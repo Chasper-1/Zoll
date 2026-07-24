@@ -99,20 +99,20 @@ impl IncrementalDoc {
         // Перепарсиваем ТОЛЬКО строки в диапазоне [start_line..shift_new_start)
         for i in start_line..shift_new_start.min(new_starts_len) {
             let line = self.get_line_text(i);
-            new_asts[i] = parse_line_or_empty(&line);
+            new_asts[i] = parse_line_or_empty(line);
         }
 
         self.line_asts = new_asts;
 
-        // Merge от начала затронутого блока
+        // Merge от начала затронутого блока.
+        // БЕЗ клонирования line_asts — merge принимает &[LineAST].
         let merge_start = self.find_block_start(start_line);
-        let partial: Vec<LineAST> = self.line_asts[merge_start..].to_vec();
 
         if merge_start == 0 {
             self.merged_ast = merge(&self.line_asts);
         } else {
             let clean = merge(&self.line_asts[..merge_start]);
-            let dirty = merge(&partial);
+            let dirty = merge(&self.line_asts[merge_start..]);
             let mut combined = clean;
             combined.children.extend(dirty.children);
             self.merged_ast = combined;
@@ -160,34 +160,22 @@ impl IncrementalDoc {
 
         for i in start_line..parse_end {
             let text = self.get_line_text(i);
-            self.line_asts[i] = parse_line_or_empty(&text);
+            self.line_asts[i] = parse_line_or_empty(text);
         }
 
-        // 4. Определяем диапазон для merge: от начала блока, содержащего viewport,
-        //    до конца viewport
-        let merge_start = self.find_block_start(viewport.first_line.min(start_line));
+        // 4. Merge до конца viewport (один проход вместо чистый/грязный).
+        //    Строки до start_line не менялись, но merge всё равно проходит
+        //    по ним — это можно будет кешировать в будущем.
         let merge_end = (viewport.last_line + 1).min(self.line_asts.len());
-
-        // 5. Merge только видимого диапазона
-        if merge_start == 0 {
-            let visible = &self.line_asts[..merge_end];
-            self.merged_ast = merge(visible);
-        } else {
-            let clean = merge(&self.line_asts[..merge_start]);
-            let visible = &self.line_asts[merge_start..merge_end];
-            let dirty = merge(visible);
-            let mut combined = clean;
-            combined.children.extend(dirty.children);
-            self.merged_ast = combined;
-        }
+        self.merged_ast = merge(&self.line_asts[..merge_end]);
 
         &self.merged_ast
     }
 
-    /// Получить текст строки по индексу.
-    fn get_line_text(&self, idx: usize) -> String {
+    /// Получить текст строки по индексу (без аллокации — возвращает &str из source).
+    fn get_line_text(&self, idx: usize) -> &str {
         if idx >= self.line_starts.len() {
-            return String::new();
+            return "";
         }
         let start = self.line_starts[idx];
         let end = if idx + 1 < self.line_starts.len() {
@@ -195,14 +183,13 @@ impl IncrementalDoc {
         } else {
             self.source.len()
         };
-        let mut line = self.source[start..end].to_string();
-        if line.ends_with('\n') {
-            line.pop();
-            if line.ends_with('\r') {
-                line.pop();
-            }
+        let line = &self.source[start..end];
+        // Отрезаем \n и \r\n без аллокации
+        if let Some(stripped) = line.strip_suffix('\n') {
+            stripped.strip_suffix('\r').unwrap_or(stripped)
+        } else {
+            line
         }
-        line
     }
 
     /// Найти номер строки по байтовой позиции.
