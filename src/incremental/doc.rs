@@ -46,41 +46,34 @@ impl IncrementalDoc {
 
     /// Применить правку: удалить `[from..to)` и вставить `text`.
     pub fn edit(&mut self, from: usize, to: usize, text: &str) -> &MarkupDoc {
-        let old_lines_before = self.line_at_byte(from);
-        let old_lines_removed = if to > from {
-            self.line_at_byte(to).saturating_sub(old_lines_before)
+        let start_line = self.line_at_byte(from);
+
+        // Сохраняем информацию о том, заканчивался ли удаляемый фрагмент на '\n'
+        // (нужно для rebuild_line_starts, чтобы корректно обработать границу).
+        let removed_ends_with_newline = if to > from {
+            matches!(self.source.as_bytes().get(to.saturating_sub(1)), Some(b'\n'))
         } else {
-            0
+            false
         };
 
         self.source.replace_range(from..to, text);
-        self.rebuild_line_starts(from);
+        self.rebuild_line_starts(from, to, text, removed_ends_with_newline);
 
-        let new_lines = self.source[self.line_starts[old_lines_before]..]
-            .lines()
-            .count()
-            .max(1);
-        let changed_line_count = new_lines + old_lines_removed;
-
-        let start_line = old_lines_before;
-        let end_line = (start_line + changed_line_count).min(self.line_asts.len());
-
+        // Расширяем line_asts до нового количества строк
         while self.line_asts.len() < self.line_starts.len() {
             self.line_asts.push(LineAST::Empty);
         }
 
-        for i in start_line..end_line {
+        // Перепарсиваем все строки от start_line до конца документа
+        for i in start_line..self.line_starts.len() {
             let line = self.get_line_text(i);
             self.line_asts[i] = parse_line_or_empty(&line);
         }
 
-        let expected_lines = self.line_starts.len();
-        self.line_asts.truncate(expected_lines);
+        // Обрезаем лишние строки (если документ стал короче)
+        self.line_asts.truncate(self.line_starts.len());
 
-        while self.line_asts.len() < expected_lines {
-            self.line_asts.push(LineAST::Empty);
-        }
-
+        // Merge от начала затронутого блока
         let merge_start = self.find_block_start(start_line);
         let partial: Vec<LineAST> = self.line_asts[merge_start..].to_vec();
 
@@ -104,48 +97,47 @@ impl IncrementalDoc {
     /// Строки вне видимости НЕ парсятся заново (используется старый `line_ast`).
     pub fn edit_visible(&mut self, from: usize, to: usize, text: &str, viewport: &Viewport) -> &MarkupDoc {
         // 1. Применяем правку к source
-        let old_lines_before = self.line_at_byte(from);
-        let old_lines_removed = if to > from {
-            self.line_at_byte(to).saturating_sub(old_lines_before)
+        let start_line = self.line_at_byte(from);
+
+        let removed_ends_with_newline = if to > from {
+            matches!(self.source.as_bytes().get(to.saturating_sub(1)), Some(b'\n'))
         } else {
-            0
+            false
         };
 
         self.source.replace_range(from..to, text);
-        self.rebuild_line_starts(from);
+        self.rebuild_line_starts(from, to, text, removed_ends_with_newline);
+        let new_line_count = self.line_starts.len();
 
-        // 2. Перепарсиваем ТОЛЬКО изменившиеся строки
-        let new_lines = self.source[self.line_starts[old_lines_before]..]
-            .lines()
-            .count()
-            .max(1);
-        let changed_line_count = new_lines + old_lines_removed;
+        // 2. Перестраиваем line_asts:
+        //    - строки ДО start_line сохраняют старые AST (их текст не менялся)
+        //    - строки ПОСЛЕ start_line заполняются Empty (потом перезапишем нужные)
+        self.line_asts.truncate(start_line);
+        self.line_asts.resize(new_line_count, LineAST::Empty);
 
-        let start_line = old_lines_before;
-        let end_line = (start_line + changed_line_count).min(self.line_asts.len());
+        // 3. Перепарсиваем ТОЛЬКО строки от start_line до конца viewport.
+        //    Строки за пределами viewport НЕ парсятся — они остаются Empty
+        //    и не участвуют в merge.
+        let parse_end = if start_line <= viewport.last_line {
+            (viewport.last_line + 1).min(new_line_count)
+        } else {
+            // Правка ПОСЛЕ viewport — строки в viewport не изменились,
+            // их старые AST сохранены (start_line > viewport.last_line,
+            // truncate не затронул их).
+            return &self.merged_ast;
+        };
 
-        while self.line_asts.len() < self.line_starts.len() {
-            self.line_asts.push(LineAST::Empty);
+        for i in start_line..parse_end {
+            let text = self.get_line_text(i);
+            self.line_asts[i] = parse_line_or_empty(&text);
         }
 
-        for i in start_line..end_line {
-            let line = self.get_line_text(i);
-            self.line_asts[i] = parse_line_or_empty(&line);
-        }
-
-        let expected_lines = self.line_starts.len();
-        self.line_asts.truncate(expected_lines);
-
-        while self.line_asts.len() < expected_lines {
-            self.line_asts.push(LineAST::Empty);
-        }
-
-        // 3. Определяем диапазон для merge: от начала блока, содержащего viewport,
+        // 4. Определяем диапазон для merge: от начала блока, содержащего viewport,
         //    до конца viewport
         let merge_start = self.find_block_start(viewport.first_line.min(start_line));
         let merge_end = (viewport.last_line + 1).min(self.line_asts.len());
 
-        // 4. Merge только видимого диапазона
+        // 5. Merge только видимого диапазона
         if merge_start == 0 {
             let visible = &self.line_asts[..merge_end];
             self.merged_ast = merge(visible);
@@ -208,19 +200,40 @@ impl IncrementalDoc {
         self.line_number(byte)
     }
 
-    fn rebuild_line_starts(&mut self, from: usize) {
+    fn rebuild_line_starts(&mut self, from: usize, to_old: usize, text: &str, removed_ends_with_newline: bool) {
         let start_idx = self.line_at_byte(from);
 
+        // Сохраняем начала строк ДО правки
         let mut result: Vec<usize> = self.line_starts[..=start_idx].to_vec();
         result.truncate(start_idx + 1);
 
-        let suffix: Vec<usize> = self.source[from..]
-            .char_indices()
-            .filter(|(_, c)| *c == '\n')
-            .map(|(i, _)| from + i + 1)
-            .collect();
+        // Сканируем ТОЛЬКО вставленный текст на наличие '\n'
+        for (i, c) in text.char_indices() {
+            if c == '\n' {
+                result.push(from + i + 1);
+            }
+        }
 
-        result.extend(suffix);
+        // Сдвигаем старые начала строк ПОСЛЕ удалённого диапазона
+        let delta = text.len() as isize - (to_old - from) as isize;
+        for i in (start_idx + 1)..self.line_starts.len() {
+            let old_pos = self.line_starts[i];
+            if old_pos < to_old {
+                // Старое начало строки находится внутри удалённого диапазона — пропускаем
+                continue;
+            }
+            // Если это ПЕРВОЕ старое начало после to_old И удалённый текст заканчивался на '\n',
+            // то это начало строки было создано этим '\n' и больше не существует.
+            if old_pos == to_old && removed_ends_with_newline {
+                continue;
+            }
+            let new_pos = (old_pos as isize + delta) as usize;
+            // Защита от дубликатов (теоретически не должно возникать)
+            if result.last().copied().map_or(true, |last| new_pos > last) {
+                result.push(new_pos);
+            }
+        }
+
         self.line_starts = result;
     }
 

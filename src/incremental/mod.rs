@@ -15,4 +15,4 @@
 
 mod doc;
 
-pub use doc::IncrementalDoc;
+pub use doc::{build_line_starts, IncrementalDoc};
