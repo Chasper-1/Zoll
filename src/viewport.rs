@@ -3,22 +3,22 @@
 //! `IncrementalDoc::edit_visible()` использует `Viewport`, чтобы перепарсить
 //! только видимые строки плюс блок-контейнеры, обеспечивающие корректность AST.
 
-/// Видимый диапазон строк в редакторе.
-///
-/// Парсер НЕ вычисляет его сам — это задача редактора/лейаута.
-/// Парсер только принимает готовые границы.
+// Видимый диапазон строк в редакторе.
+//
+// Парсер НЕ вычисляет его сам — это задача редактора/лейаута.
+// Парсер только принимает готовые границы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
-    /// Первая видимая строка (0-based).
+    // Первая видимая строка (0-based).
     pub first_line: usize,
-    /// Последняя видимая строка (0-based, включительно).
+    // Последняя видимая строка (0-based, включительно).
     pub last_line: usize,
 }
 
 impl Viewport {
-    /// Создать viewport по номерам строк.
-    ///
-    /// Если `last_line < first_line`, строки меняются местами.
+    // Создать viewport по номерам строк.
+    //
+    // Если `last_line < first_line`, строки меняются местами.
     pub fn new(first: usize, last: usize) -> Self {
         if last < first {
             Viewport {
@@ -33,17 +33,17 @@ impl Viewport {
         }
     }
 
-    /// Создать viewport по байтовым позициям в тексте.
-    ///
-    /// Использует `line_starts` для перевода байт → номера строк.
-    /// Удобно, когда редактор знает только байтовые границы видимой области.
+    // Создать viewport по байтовым позициям в тексте.
+    //
+    // Использует `line_starts` для перевода байт → номера строк.
+    // Удобно, когда редактор знает только байтовые границы видимой области.
     pub fn from_bytes(line_starts: &[usize], first_byte: usize, last_byte: usize) -> Self {
         let first = line_number(line_starts, first_byte);
         let last = line_number(line_starts, last_byte);
         Viewport::new(first, last)
     }
 
-    /// Количество видимых строк.
+    // Количество видимых строк.
     pub fn height(&self) -> usize {
         if self.last_line >= self.first_line {
             self.last_line - self.first_line + 1
@@ -52,13 +52,13 @@ impl Viewport {
         }
     }
 
-    /// Проверить, входит ли строка в видимый диапазон.
+    // Проверить, входит ли строка в видимый диапазон.
     pub fn contains(&self, line: usize) -> bool {
         line >= self.first_line && line <= self.last_line
     }
 }
 
-/// Номер строки по байтовой позиции (0-based).
+// Номер строки по байтовой позиции (0-based).
 fn line_number(line_starts: &[usize], byte_pos: usize) -> usize {
     match line_starts.binary_search(&byte_pos) {
         Ok(i) => i,

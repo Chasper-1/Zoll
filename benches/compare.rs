@@ -33,9 +33,9 @@ use comrak::Arena;
 const DOC_LINES: usize = 5_000;
 const VIEWPORT_SIZE: usize = 40;
 
-/// Генерирует zoll-документ (5000 строк, ~390 KB).
-/// Содержит всю палитру синтаксиса: заголовки, bold, italic, списки,
-/// цитаты, комментарии, спойлеры, таблицы, формулы.
+// Генерирует zoll-документ (5000 строк, ~390 KB).
+// Содержит всю палитру синтаксиса: заголовки, bold, italic, списки,
+// цитаты, комментарии, спойлеры, таблицы, формулы.
 fn generate_zoll_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("#1# Benchmark Document\n\n");
@@ -61,9 +61,9 @@ fn generate_zoll_doc(lines: usize) -> String {
     s
 }
 
-/// Генерирует семантически эквивалентный markdown-документ.
-/// Конвертация: `//italic//` → `*italic*`, `==highlight==` → `==highlight==`,
-/// `%%` → `<!-- -->`, `++insert++` → `<ins>insert</ins>`, и т.д.
+// Генерирует семантически эквивалентный markdown-документ.
+// Конвертация: `//italic//` → `*italic*`, `==highlight==` → `==highlight==`,
+// `%%` → `<!-- -->`, `++insert++` → `<ins>insert</ins>`, и т.д.
 fn generate_md_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("# Benchmark Document\n\n");
@@ -91,8 +91,8 @@ fn generate_md_doc(lines: usize) -> String {
 
 // ─── Рендерер zoll → HTML (для честного сравнения HTML) ──────
 
-/// Минимальный рендерер zoll → HTML.
-/// НЕ претендует на полноту, только для бенчмарка.
+// Минимальный рендерер zoll → HTML.
+// НЕ претендует на полноту, только для бенчмарка.
 fn render_zoll_html(text: &str) -> String {
     let doc = zoll::parser::parse_full(text);
     let mut html = String::with_capacity(text.len() + 1024);
@@ -190,10 +190,10 @@ fn escape_html(s: &str) -> String {
 
 // ─── 1. Stream parsing: плоский список, без дерева ────────────
 
-/// Парсинг в плоский поток событий/строк.
-/// zoll: `parse_line` → `Vec<LineAST>` (уже структурированный, но плоский).
-/// pulldown-cmark: `Parser` → `Vec<Event>` (поток тегов).
-/// comrak: аналогичного API нет.
+// Парсинг в плоский поток событий/строк.
+// zoll: `parse_line` → `Vec<LineAST>` (уже структурированный, но плоский).
+// pulldown-cmark: `Parser` → `Vec<Event>` (поток тегов).
+// comrak: аналогичного API нет.
 fn bench_stream_parse(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
@@ -223,10 +223,10 @@ fn bench_stream_parse(c: &mut Criterion) {
 
 // ─── 2. AST tree: полное дерево документа ─────────────────────
 
-/// Построение полноценного AST-дерева.
-/// zoll: `parse_full()` → `MarkupDoc` (векторная структура).
-/// comrak: `parse_document()` → `&AstNode` (арена).
-/// pulldown-cmark: не строит дерево.
+// Построение полноценного AST-дерева.
+// zoll: `parse_full()` → `MarkupDoc` (векторная структура).
+// comrak: `parse_document()` → `&AstNode` (арена).
+// pulldown-cmark: не строит дерево.
 fn bench_ast_build(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
@@ -257,8 +257,8 @@ fn bench_ast_build(c: &mut Criterion) {
 
 // ─── 3. HTML render: все три парсера → HTML ───────────────────
 
-/// Парсинг + рендер в HTML.
-/// У всех трёх одинаковый формат на выходе.
+// Парсинг + рендер в HTML.
+// У всех трёх одинаковый формат на выходе.
 fn bench_html_render(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
@@ -296,15 +296,15 @@ fn bench_html_render(c: &mut Criterion) {
 
 // ─── 4. Incremental (только zoll) ─────────────────────────────
 
-/// Сравнение полного перепарса vs ленивого (viewport).
-///
-/// ВАЖНО: используем `iter()` на одном документе, а не `iter_batched`
-/// с клоном. Клон IncrementalDoc — глубокое копирование всех 5000
-/// LineAST со строками, что занимает ~1 ms и скрывает реальную
-/// производительность инкрементального парсинга.
-///
-/// Документ растёт на 1 байт за итерацию — за 100 итераций это
-/// +100 байт на 390 KB, влиянием можно пренебречь.
+// Сравнение полного перепарса vs ленивого (viewport).
+//
+// ВАЖНО: используем `iter()` на одном документе, а не `iter_batched`
+// с клоном. Клон IncrementalDoc — глубокое копирование всех 5000
+// LineAST со строками, что занимает ~1 ms и скрывает реальную
+// производительность инкрементального парсинга.
+//
+// Документ растёт на 1 байт за итерацию — за 100 итераций это
+// +100 байт на 390 KB, влиянием можно пренебречь.
 fn bench_incremental(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let edit_pos = zoll_doc.len() / 2;
@@ -345,7 +345,7 @@ fn bench_incremental(c: &mut Criterion) {
 
 // ─── 5. Viewport scaling (только zoll) ────────────────────────
 
-/// Как размер viewport влияет на скорость edit_visible().
+// Как размер viewport влияет на скорость edit_visible().
 fn bench_viewport_scaling(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let edit_pos = zoll_doc.len() / 2;
@@ -382,7 +382,7 @@ fn bench_viewport_scaling(c: &mut Criterion) {
 
 // ─── 6. Breakdown (только zoll) ───────────────────────────────
 
-/// Из чего складывается время полного парсинга.
+// Из чего складывается время полного парсинга.
 fn bench_zoll_breakdown(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
 

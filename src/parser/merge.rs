@@ -2,7 +2,7 @@
 
 use crate::ast::{BlockType, LineAST, MarkupDoc, MarkupNode};
 
-/// Собирает `Vec<LineAST>` (по одному на строку) в `MarkupDoc`.
+// Собирает `Vec<LineAST>` (по одному на строку) в `MarkupDoc`.
 pub fn merge(lines: &[LineAST]) -> MarkupDoc {
     let mut doc = MarkupDoc {
         children: Vec::new(),
@@ -429,7 +429,7 @@ fn flush_all(
 
 // ─── Полный парсинг (удобство) ────────────────────────────────
 
-/// Парсит текст целиком: разбивка на строки → parse_line → merge.
+// Парсит текст целиком: разбивка на строки → parse_line → merge.
 pub fn parse_full(text: &str) -> MarkupDoc {
     let lines: Vec<LineAST> = text.lines().map(|l| crate::parser::parse_line(l)).collect();
     merge(&lines)

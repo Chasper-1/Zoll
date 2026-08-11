@@ -1,6 +1,6 @@
 use std::ops::BitOr;
 
-/// Битовая маска стилей разметки.
+// Битовая маска стилей разметки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarkupStyle(pub u32);
 

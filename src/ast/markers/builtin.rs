@@ -1,7 +1,7 @@
 use crate::ast::markers::def::MarkerDef;
 use crate::ast::style::MarkupStyle;
 
-/// Все маркеры zoll. Упорядочены от длинных к коротким для правильного приоритета.
+// Все маркеры zoll. Упорядочены от длинных к коротким для правильного приоритета.
 pub const MARKERS: &[MarkerDef] = &[
     MarkerDef {
         open: "%%",

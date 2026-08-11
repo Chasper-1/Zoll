@@ -4,7 +4,7 @@
 
 use crate::ast::{BlockType, LineAST, MarkupNode, MarkupStyle};
 
-/// Парсит одну строку (без `\n`) в `LineAST`.
+// Парсит одну строку (без `\n`) в `LineAST`.
 pub fn parse_line(line: &str) -> LineAST {
     let trimmed = line.trim_start();
 
@@ -132,9 +132,9 @@ pub fn parse_line(line: &str) -> LineAST {
     LineAST::Paragraph(parse_inline(trimmed))
 }
 
-/// Парсит inline-маркеры в тексте.
-///
-/// Поддерживает: ** // __ '' ,, ~~ == ++ -- $ $
+// Парсит inline-маркеры в тексте.
+//
+// Поддерживает: ** // __ '' ,, ~~ == ++ -- $ $
 pub fn parse_inline(text: &str) -> Vec<MarkupNode> {
     let bytes = text.as_bytes();
     let len = text.len();

@@ -8,29 +8,29 @@ use crate::ast::{LineAST, MarkupDoc};
 use crate::parser::merge;
 use crate::viewport::Viewport;
 
-/// Инкрементальный документ.
-///
-/// # Пример
-///
-/// ```rust
-/// use zoll::incremental::IncrementalDoc;
-///
-/// let mut doc = IncrementalDoc::new("**hello** world");
-/// doc.edit(0, 0, "very ");
-/// ```
+// Инкрементальный документ.
+//
+// # Пример
+//
+// ```rust
+// use zoll::incremental::IncrementalDoc;
+//
+// let mut doc = IncrementalDoc::new("**hello** world");
+// doc.edit(0, 0, "very ");
+// ```
 pub struct IncrementalDoc {
-    /// Исходный текст.
+    // Исходный текст.
     pub source: String,
-    /// Байтовые начала строк (line_starts[i] = байт начала строки i).
+    // Байтовые начала строк (line_starts[i] = байт начала строки i).
     pub line_starts: Vec<usize>,
-    /// AST каждой строки (после parse_line).
+    // AST каждой строки (после parse_line).
     pub line_asts: Vec<LineAST>,
-    /// Собранный общий AST (после merge).
+    // Собранный общий AST (после merge).
     pub merged_ast: MarkupDoc,
 }
 
 impl IncrementalDoc {
-    /// Создать новый документ из текста.
+    // Создать новый документ из текста.
     pub fn new(text: &str) -> Self {
         let line_starts = build_line_starts(text);
         let line_asts: Vec<LineAST> = text.lines().map(|l| parse_line_or_empty(l)).collect();
@@ -44,7 +44,7 @@ impl IncrementalDoc {
         }
     }
 
-    /// Применить правку: удалить `[from..to)` и вставить `text`.
+    // Применить правку: удалить `[from..to)` и вставить `text`.
     pub fn edit(&mut self, from: usize, to: usize, text: &str) -> &MarkupDoc {
         let start_line = self.line_at_byte(from);
         // Последняя строка, затронутая правкой (в старых индексах).
@@ -121,11 +121,11 @@ impl IncrementalDoc {
         &self.merged_ast
     }
 
-    /// Применить правку и перепарсить только видимый диапазон + блоки.
-    ///
-    /// Работает как `edit()`, но merge делает только для строк,
-    /// попадающих в `viewport`, плюс блок-контейнеры, в которые они входят.
-    /// Строки вне видимости НЕ парсятся заново (используется старый `line_ast`).
+    // Применить правку и перепарсить только видимый диапазон + блоки.
+    //
+    // Работает как `edit()`, но merge делает только для строк,
+    // попадающих в `viewport`, плюс блок-контейнеры, в которые они входят.
+    // Строки вне видимости НЕ парсятся заново (используется старый `line_ast`).
     pub fn edit_visible(&mut self, from: usize, to: usize, text: &str, viewport: &Viewport) -> &MarkupDoc {
         // 1. Применяем правку к source
         let start_line = self.line_at_byte(from);
@@ -172,7 +172,7 @@ impl IncrementalDoc {
         &self.merged_ast
     }
 
-    /// Получить текст строки по индексу (без аллокации — возвращает &str из source).
+    // Получить текст строки по индексу (без аллокации — возвращает &str из source).
     fn get_line_text(&self, idx: usize) -> &str {
         if idx >= self.line_starts.len() {
             return "";
@@ -192,7 +192,7 @@ impl IncrementalDoc {
         }
     }
 
-    /// Найти номер строки по байтовой позиции.
+    // Найти номер строки по байтовой позиции.
     pub fn line_number(&self, byte_pos: usize) -> usize {
         let byte_pos = byte_pos.min(self.source.len());
         match self.line_starts.binary_search(&byte_pos) {
@@ -207,7 +207,7 @@ impl IncrementalDoc {
         }
     }
 
-    /// Количество строк.
+    // Количество строк.
     pub fn num_lines(&self) -> usize {
         self.line_starts.len()
     }
@@ -255,7 +255,7 @@ impl IncrementalDoc {
         self.line_starts = result;
     }
 
-    /// Найти начало блок-левел блока, содержащего `line`.
+    // Найти начало блок-левел блока, содержащего `line`.
     fn find_block_start(&self, line: usize) -> usize {
         // Сначала считаем глубину вложенности на строке `line`
         let mut depth = 0i32;
@@ -289,7 +289,7 @@ impl IncrementalDoc {
 
 // ─── Помощники ───────────────────────────────────────────────
 
-/// Парсит строку или возвращает Empty для пустой.
+// Парсит строку или возвращает Empty для пустой.
 fn parse_line_or_empty(line: &str) -> LineAST {
     if line.trim().is_empty() && line.is_empty() {
         if line.is_empty() {
@@ -299,7 +299,7 @@ fn parse_line_or_empty(line: &str) -> LineAST {
     crate::parser::parse_line(line)
 }
 
-/// Построить массив начал строк из текста.
+// Построить массив начал строк из текста.
 pub fn build_line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (i, c) in text.char_indices() {

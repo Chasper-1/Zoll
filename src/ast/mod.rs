@@ -12,5 +12,5 @@ pub use markers::MarkerDef;
 pub use node::MarkupNode;
 pub use style::MarkupStyle;
 
-/// Все маркеры zoll.
+// Все маркеры zoll.
 pub use markers::MARKERS;
