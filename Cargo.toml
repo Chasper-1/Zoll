@@ -1,6 +1,6 @@
 [package]
 name = "zoll"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Zoll markup language — lazy, line-level parser"
 
@@ -9,6 +9,8 @@ description = "Zoll markup language — lazy, line-level parser"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 pulldown-cmark = "0.13"
+sparkdown = "0.1"
+ferromark = "0.7"
 
 [[bench]]
 name = "compare"

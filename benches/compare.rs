@@ -1,9 +1,15 @@
-//! Бенчмарки zoll (движок) vs pulldown-cmark.
+//! Бенчмарки zoll (движок) vs другие Rust markdown-парсеры.
 //!
-//! | Группа | Что меряет | zoll | pulldown-cmark |
-//! |--------|-----------|:----:|:--------------:|
-//! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> |
-//! | `zoll_breakdown` | scan (маски) vs полный проход | ✅ | — |
+//! | Группа | Что меряет | zoll | pulldown-cmark | sparkdown | ferromark |
+//! |--------|-----------|:----:|:--------------:|:---------:|:---------:|
+//! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> | — | ✅ Vec<BlockEvent> |
+//! | `html_render` | Парсинг + рендер в HTML | — | ✅ | ✅ | ✅ |
+//! | `zoll_breakdown` | scan (маски) vs полный проход | ✅ | — | — | — |
+//!
+//! sparkdown (0.1.0) — HTML-only (scaffold, только абзацы), поэтому только
+//! в `html_render`. ferromark — стриминг событий без HTML (BlockParser),
+//! поэтому и в `parse_spans`, и в `html_render`. Оба парсят тот же `md_doc`,
+//! что и pulldown-cmark.
 //!
 //! Запуск:
 //!   cargo bench --bench compare
@@ -119,6 +125,20 @@ fn bench_parse_spans(c: &mut Criterion) {
         });
     });
 
+    // ferromark: стриминг блочных событий без HTML (BlockParser → Vec<BlockEvent>).
+    // Options::commonmark() — синтаксис CommonMark; render_policy на парсинг не влияет.
+    group.bench_function("ferromark_block_events", |b| {
+        b.iter(|| {
+            let mut parser = ferromark::block::BlockParser::new_with_options(
+                black_box(md_doc.as_bytes()),
+                ferromark::Options::commonmark(),
+            );
+            let mut events: Vec<ferromark::block::BlockEvent> = Vec::new();
+            parser.parse(&mut events);
+            black_box(events);
+        });
+    });
+
     group.finish();
 }
 
@@ -138,6 +158,28 @@ fn bench_html_render(c: &mut Criterion) {
             let parser = pulldown_cmark::Parser::new(black_box(&md_doc));
             let mut html = String::new();
             pulldown_cmark::html::push_html(&mut html, parser);
+            black_box(html);
+        });
+    });
+
+    // sparkdown: CommonMark 0.31.2, дефолтный быстрый путь (без фич).
+    // Внимание: 0.1.0 — scaffold, реально парсит только абзацы.
+    group.bench_function("sparkdown_html", |b| {
+        b.iter(|| {
+            let html = sparkdown::to_html(black_box(&md_doc));
+            black_box(html);
+        });
+    });
+
+    // ferromark: CommonMark-синтаксис, Trusted-рендер (raw HTML пропускается,
+    // как у pulldown; дефолтный Untrusted экранировал бы его — нечестно).
+    let ferromark_opts = ferromark::Options {
+        render_policy: ferromark::RenderPolicy::Trusted,
+        ..ferromark::Options::commonmark()
+    };
+    group.bench_function("ferromark_html", |b| {
+        b.iter(|| {
+            let html = ferromark::to_html_with_options(black_box(&md_doc), &ferromark_opts);
             black_box(html);
         });
     });
