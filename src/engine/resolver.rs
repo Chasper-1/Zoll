@@ -64,12 +64,15 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
     let mut spans = Vec::new();
     // Стек открытых inline-маркеров: (свойство, позиция открытия).
     let mut inline_stack: Vec<(SyntaxKind, usize)> = Vec::new();
+    // Стек открытых line-level маркеров (%%/$$/!!): (свойство, позиция открытия).
+    let mut line_stack: Vec<(SyntaxKind, usize)> = Vec::new();
 
     for marker in markers {
         match marker.byte {
             b'\n' => {
-                // Inline не выходит за пределы строки — сбрасываем.
+                // Inline и line-level не выходят за строку — сбрасываем.
                 inline_stack.clear();
+                line_stack.clear();
             }
             b')' if marker.len() >= 2 => {
                 // Универсальная inline-закрывашка.
@@ -89,7 +92,39 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
                     });
                 }
             }
+            b'}' => {
+                // Контекстная line-level закрывашка: только при открытом состоянии.
+                if line_stack.is_empty() {
+                    continue;
+                }
+                // Правило пробелов: перед `}` не должно быть пробела.
+                if marker.start > 0 && text[marker.start - 1] == b' ' {
+                    continue;
+                }
+                if let Some((kind, open_start)) = line_stack.pop() {
+                    spans.push(SyntaxSpan {
+                        start: open_start,
+                        end: marker.end,
+                        kind,
+                    });
+                }
+            }
+            b'.' => {
+                // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
+                if let Some(span) = try_numbered_list(text, marker, line_map) {
+                    spans.push(span);
+                }
+            }
             _ => {
+                // Line-level открытие — с любого места строки.
+                if let Some(kind) = line_level_open(marker.byte, marker.len()) {
+                    // Правило пробелов: после маркера не должно быть пробела.
+                    if marker.end < text.len() && text[marker.end] == b' ' {
+                        continue;
+                    }
+                    line_stack.push((kind, marker.start));
+                    continue;
+                }
                 // Line-маркеры — только в начале строки.
                 if is_line_start(marker.start, line_map, text)
                     && let Some(span) = try_line_marker(text, marker, line_map)
@@ -137,6 +172,16 @@ fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
     }
 }
 
+// Свойство line-level маркера (%%/$$/!!) — закрывается `}`.
+fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
+    match (byte, len) {
+        (b'%', 2) => Some(SyntaxKind::Comment),
+        (b'$', 2) => Some(SyntaxKind::Formula),
+        (b'!', 2) => Some(SyntaxKind::Spoiler),
+        _ => None,
+    }
+}
+
 // Line-маркер в начале строки.
 fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<SyntaxSpan> {
     let (line_start, line_end) = line_map.line_bounds(line_map.line_at(marker.start));
@@ -153,42 +198,30 @@ fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<S
                     kind: SyntaxKind::Tag,
                 });
             }
-            // Заголовок `#N#`
+            // Заголовок `#N ` — цифры, затем пробел или конец строки.
             let after = &line[rel + 1..];
-            let digits: String = after
+            let digit_count = after
                 .iter()
                 .take_while(|byte| byte.is_ascii_digit())
-                .map(|&byte| byte as char)
-                .collect();
-            if !digits.is_empty() {
-                let level = digits.parse::<u32>().unwrap_or(1);
-                let rest = &after[digits.len()..];
-                if let Some(close_rel) = rest.iter().position(|&byte| byte == b'#') {
-                    let end = marker.start + 1 + digits.len() + close_rel + 1;
+                .count();
+            if digit_count > 0 {
+                let level: u32 = after[..digit_count]
+                    .iter()
+                    .map(|&byte| byte as char)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(1);
+                let rest = &after[digit_count..];
+                if rest.is_empty() || rest[0] == b' ' {
                     return Some(SyntaxSpan {
                         start: marker.start,
-                        end,
+                        end: line_end.min(text.len()),
                         kind: SyntaxKind::Header(level),
                     });
                 }
             }
             None
         }
-        b'%' if marker.len() >= 2 => Some(SyntaxSpan {
-            start: marker.start,
-            end: line_end.min(text.len()),
-            kind: SyntaxKind::Comment,
-        }),
-        b'!' if marker.len() >= 2 => Some(SyntaxSpan {
-            start: marker.start,
-            end: line_end.min(text.len()),
-            kind: SyntaxKind::Spoiler,
-        }),
-        b'$' if marker.len() >= 2 => Some(SyntaxSpan {
-            start: marker.start,
-            end: line_end.min(text.len()),
-            kind: SyntaxKind::Formula,
-        }),
         b'>' => Some(SyntaxSpan {
             start: marker.start,
             end: line_end.min(text.len()),
@@ -228,6 +261,32 @@ fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<S
             kind: SyntaxKind::TableRow,
         }),
         _ => None,
+    }
+}
+
+// Нумерованный список `1. ` — цифры от начала строки, затем пробел.
+fn try_numbered_list(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<SyntaxSpan> {
+    let (line_start, line_end) = line_map.line_bounds(line_map.line_at(marker.start));
+    let line = &text[line_start..line_end.min(text.len())];
+    let rel = marker.start - line_start;
+    // Первая не-пробельная позиция строки — начало цифр.
+    let digits_start = line
+        .iter()
+        .position(|&byte| byte != b' ' && byte != b'\t')?;
+    // До `.` — только цифры, после — пробел или конец строки.
+    if digits_start < rel
+        && line[digits_start..rel]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
+        && line.get(rel + 1).is_none_or(|&byte| byte == b' ')
+    {
+        Some(SyntaxSpan {
+            start: line_start,
+            end: line_end.min(text.len()),
+            kind: SyntaxKind::ListItem,
+        })
+    } else {
+        None
     }
 }
 
@@ -311,22 +370,30 @@ mod tests {
 
     #[test]
     fn header_span() {
-        // спан покрывает маркер #1# (3 байта)
-        let spans = resolve_text("#1# Заголовок");
+        // #1 Заголовок — заголовок уровня 1, спан до конца строки.
+        // "#1 " = 3 байта + "Заголовок" = 9 символов * 2 = 18 → 21 байт
+        let spans = resolve_text("#1 Заголовок");
         assert_eq!(
             spans,
             vec![SyntaxSpan {
                 start: 0,
-                end: 3,
+                end: 21,
                 kind: SyntaxKind::Header(1)
             }]
         );
     }
 
     #[test]
+    fn header_requires_space() {
+        // #1Заголовок — без пробела после цифр, не заголовок
+        assert!(resolve_text("#1Заголовок").is_empty());
+    }
+
+    #[test]
     fn comment_line() {
-        // %% скрыто = 2 + 1 + 12 = 15 байт
-        let spans = resolve_text("%% скрыто");
+        // %%скрыто} — комментарий до }, без пробелов
+        // "%%" = 2 + "скрыто" = 6*2 = 12 + "}" = 1 → 15 байт
+        let spans = resolve_text("%%скрыто}");
         assert_eq!(
             spans,
             vec![SyntaxSpan {
@@ -338,9 +405,52 @@ mod tests {
     }
 
     #[test]
+    fn comment_unclosed_discarded() {
+        // %% без } — незавершённая конструкция, выбрасывается
+        assert!(resolve_text("%%скрыто").is_empty());
+    }
+
+    #[test]
+    fn comment_mid_line() {
+        // line-level маркер работает с любого места строки
+        let spans = resolve_text("Текст %%комментарий}");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+    }
+
+    #[test]
+    fn comment_space_after_marker_invalid() {
+        // пробел после %% — не комментарий (правило «без пробелов»)
+        assert!(resolve_text("%% скрыто}").is_empty());
+    }
+
+    #[test]
+    fn comment_space_before_close_invalid() {
+        // пробел перед } — не закрывашка
+        assert!(resolve_text("%%скрыто }").is_empty());
+    }
+
+    #[test]
     fn spoiler_line() {
-        let spans = resolve_text("!!спойлер: текст");
+        let spans = resolve_text("!!спойлер: текст}");
         assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+    }
+
+    #[test]
+    fn spoiler_mid_line() {
+        let spans = resolve_text("Текст !!скрытое содержимое}");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+    }
+
+    #[test]
+    fn formula_line() {
+        let spans = resolve_text("x = 5 $$sqrt(x)}");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Formula));
+    }
+
+    #[test]
+    fn brace_without_open_discarded() {
+        // } без открытого line-level состояния — не закрывашка
+        assert!(resolve_text("просто } текст").is_empty());
     }
 
     #[test]
@@ -386,5 +496,97 @@ mod tests {
                 kind: SyntaxKind::ThematicBreak
             }]
         );
+    }
+
+    // ─── Полная палитра синтаксиса из docs/syntax.md ─────────────
+
+    #[test]
+    fn full_inline_palette() {
+        // Каждый inline-маркер из таблицы раздела 1.
+        let cases: &[(&str, SyntaxKind)] = &[
+            ("**жирный))", SyntaxKind::Bold),
+            ("//курсив))", SyntaxKind::Italic),
+            ("__подчёркивание))", SyntaxKind::Underline),
+            ("~~зачёркивание))", SyntaxKind::Strikethrough),
+            ("==подсветка))", SyntaxKind::Highlight),
+            ("++вставка))", SyntaxKind::Insertion),
+            ("--удаление))", SyntaxKind::Deletion),
+            ("''верхний))", SyntaxKind::Superscript),
+            (",,нижний))", SyntaxKind::Subscript),
+            ("$x+y))", SyntaxKind::Formula),
+        ];
+        for (text, expected) in cases {
+            let spans = resolve_text(text);
+            assert_eq!(spans.len(), 1, "текст: {text}");
+            assert_eq!(spans[0].kind, *expected, "текст: {text}");
+        }
+    }
+
+    #[test]
+    fn full_line_level_palette() {
+        // Line-level маркеры из раздела 2 — закрываются `}`.
+        let cases: &[(&str, SyntaxKind)] = &[
+            ("%%комментарий}", SyntaxKind::Comment),
+            ("$$sqrt(x)}", SyntaxKind::Formula),
+            ("!!спойлер}", SyntaxKind::Spoiler),
+            ("!!заголовок:текст}", SyntaxKind::Spoiler),
+        ];
+        for (text, expected) in cases {
+            let spans = resolve_text(text);
+            assert_eq!(spans.len(), 1, "текст: {text}");
+            assert_eq!(spans[0].kind, *expected, "текст: {text}");
+        }
+    }
+
+    #[test]
+    fn full_line_start_palette() {
+        // Структурные маркеры из раздела 7.
+        let cases: &[(&str, SyntaxKind)] = &[
+            ("#1 Заголовок", SyntaxKind::Header(1)),
+            ("#:тег", SyntaxKind::Tag),
+            ("- элемент", SyntaxKind::ListItem),
+            ("1. элемент", SyntaxKind::ListItem),
+            ("> текст", SyntaxKind::Quote),
+            ("---", SyntaxKind::ThematicBreak),
+            ("| cell | cell |", SyntaxKind::TableRow),
+        ];
+        for (text, expected) in cases {
+            let spans = resolve_text(text);
+            assert!(
+                spans.iter().any(|span| span.kind == *expected),
+                "текст: {text}, спаны: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_inline_layers() {
+        // **//текст)) — bold и italic на одном тексте (раздел 10).
+        let spans = resolve_text("**//текст))");
+        let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
+        assert_eq!(kinds, vec![SyntaxKind::Italic, SyntaxKind::Bold]);
+    }
+
+    #[test]
+    fn real_document_example() {
+        // Документ в стиле «Быстрый пример» из docs/syntax.md.
+        let text = "#1 Что такое Zoll?\n\n\
+            Zoll — это **язык разметки)) с поддержкой //курсива)), \
+            __подчёркивания)) и ~~зачёркивания)).\n\n\
+            ==Важно:)) этот текст подсвечен.\n\n\
+            Текст %%эта часть не видна}\n\n\
+            Обычный текст !!а это спойлер до конца строки}\n\n\
+            x = 5 $$sqrt(x)}\n";
+        let spans = resolve_text(text);
+        let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
+        assert!(kinds.contains(&SyntaxKind::Header(1)));
+        assert!(kinds.contains(&SyntaxKind::Bold));
+        assert!(kinds.contains(&SyntaxKind::Italic));
+        assert!(kinds.contains(&SyntaxKind::Underline));
+        assert!(kinds.contains(&SyntaxKind::Strikethrough));
+        assert!(kinds.contains(&SyntaxKind::Highlight));
+        assert!(kinds.contains(&SyntaxKind::Comment));
+        assert!(kinds.contains(&SyntaxKind::Spoiler));
+        assert!(kinds.contains(&SyntaxKind::Formula));
     }
 }

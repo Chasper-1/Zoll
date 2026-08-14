@@ -10,7 +10,7 @@
 
 use super::Engine;
 
-pub use super::{Edit, SyntaxKind, SyntaxSpan};
+pub use super::{Edit, SyntaxSpan};
 
 // Ручка на получателя спанов. Реализуется редактором.
 //
@@ -70,6 +70,7 @@ impl EngineHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::SyntaxKind;
 
     // Записывает все вызовы ручки для проверки.
     struct RecordingSink {

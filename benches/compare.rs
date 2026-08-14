@@ -23,29 +23,29 @@ const DOC_LINES: usize = 5_000;
 // цитаты, комментарии, спойлеры, таблицы, формулы.
 fn generate_zoll_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
-    s.push_str("#1# Benchmark Document\n\n");
+    s.push_str("#1 Benchmark Document\n\n");
     for i in 0..lines.saturating_sub(3) {
         let section = i % 12;
         match section {
-            0 => s.push_str(&format!("#2# Section {}\n", i / 10)),
+            0 => s.push_str(&format!("#2 Section {}\n", i / 10)),
             1 => s.push_str(&format!(
-                "This is **bold {}** and //italic {}// text\n",
+                "This is **bold {})) and //italic {})) text\n",
                 i, i
             )),
-            2 => s.push_str(&format!("- list item {} with **bold**\n", i)),
-            3 => s.push_str(&format!("1. numbered item {} with //italic//\n", i)),
-            4 => s.push_str(&format!("> quote line {} with ==highlight==\n", i)),
-            5 => s.push_str(&format!("Plain text {} ~~strike~~ __underline__\n", i)),
-            6 => s.push_str(&format!("++insert++ --delete-- ''super'' ,,sub,, {}\n", i)),
-            7 => s.push_str("%% this is a comment line\n"),
-            8 => s.push_str(&format!("!! spoiler hidden content at line {}\n", i)),
+            2 => s.push_str(&format!("- list item {} with **bold))\n", i)),
+            3 => s.push_str(&format!("1. numbered item {} with //italic))\n", i)),
+            4 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
+            5 => s.push_str(&format!("Plain text {} ~~strike)) __underline))\n", i)),
+            6 => s.push_str(&format!("++insert)) --delete)) ''super)) ,,sub)) {}\n", i)),
+            7 => s.push_str(&format!("visible text %%comment {}}}\n", i)),
+            8 => s.push_str(&format!("text !!spoiler hidden {}}}\n", i)),
             9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            10 => s.push_str(&format!("$$ x = {} + y\n", i)),
+            10 => s.push_str(&format!("x = {} $$sqrt({})}}\n", i, i)),
             11 => s.push_str(&format!("plain text line {}\n", i)),
             _ => unreachable!(),
         }
     }
-    s.push_str("#1# End of Document\n");
+    s.push_str("#1 End of Document\n");
     s
 }
 
@@ -87,13 +87,22 @@ fn generate_md_doc(lines: usize) -> String {
 // zoll: `Engine::parse` → `Vec<SyntaxSpan>` (байтовые диапазоны).
 // pulldown-cmark: `Parser` → `Vec<Event>` (поток тегов).
 // Оба — плоский поток без дерева, сравнение честное.
+//
+// Методика (чтобы нельзя было докопаться до объективности):
+// - каждый парсер парсит СВОЙ документ (zoll-синтаксис vs семантически
+//   эквивалентный CommonMark) — разных текстов для обоих не бывает,
+//   т.к. языки различаются;
+// - throughput считается ПО СВОЕМУ входу: zoll — по zoll_doc, pulldown —
+//   по md_doc. Раньше pulldown мерили байтами zoll-документа — нечестно;
+// - главная метрика — абсолютное время, throughput в MiB/s — производная
+//   от размера входа каждого парсера.
 fn bench_parse_spans(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
 
     let mut group = c.benchmark_group("parse_spans");
-    group.throughput(Throughput::Bytes(zoll_doc.len() as u64));
 
+    group.throughput(Throughput::Bytes(zoll_doc.len() as u64));
     group.bench_function("zoll_engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
@@ -101,6 +110,7 @@ fn bench_parse_spans(c: &mut Criterion) {
         });
     });
 
+    group.throughput(Throughput::Bytes(md_doc.len() as u64));
     group.bench_function("pulldown_cmark_events", |b| {
         b.iter(|| {
             let events: Vec<pulldown_cmark::Event> =
@@ -151,6 +161,13 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
         });
     });
 
+    // Сколько стоит владение буфером: копия документа в Engine::parse.
+    group.bench_function("copy_buffer", |b| {
+        b.iter(|| {
+            black_box(black_box(text).to_vec());
+        });
+    });
+
     group.bench_function("build_line_map", |b| {
         let events = scan(text, INTERESTING_BYTES);
         b.iter(|| {
@@ -178,7 +195,7 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
         let engine = Engine::parse(text);
         let spans = &engine.spans;
         b.iter(|| {
-            black_box(zoll::engine::DependencyGraph::new(black_box(&spans)));
+            black_box(zoll::engine::DependencyGraph::new(black_box(spans)));
         });
     });
 
