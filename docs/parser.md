@@ -72,27 +72,27 @@ position  byte
 
 текст
 
-# ↓
+↓
 
 SIMD scan
 
-# ↓
+↓
 
 register + mask + offset
 
-# ↓
+↓
 
 (position, byte)
 
-# ↓
+↓
 
 распознавание маркеров
 
-# ↓
+↓
 
 синтаксические конструкции
 
-# ↓
+↓
 
 зависимости и инкрементальный parsing
 
