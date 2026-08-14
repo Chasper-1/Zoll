@@ -60,23 +60,24 @@ mod tests {
 
     #[test]
     fn spans_in_range() {
-        let g = DependencyGraph::new(&[span(0, 5), span(3, 8), span(10, 15)]);
-        let in_range = g.spans_in(2, 9);
+        let graph = DependencyGraph::new(&[span(0, 5), span(3, 8), span(10, 15)]);
+        let in_range = graph.spans_in(2, 9);
         assert_eq!(in_range.len(), 1);
         assert_eq!(in_range[0].start, 3);
     }
 
     #[test]
     fn spans_overlapping() {
-        let g = DependencyGraph::new(&[span(0, 5), span(3, 8), span(10, 15)]);
-        let overlapping = g.spans_overlapping(4, 11);
-        assert_eq!(overlapping.len(), 2);
+        let graph = DependencyGraph::new(&[span(0, 5), span(3, 8), span(10, 15)]);
+        let overlapping = graph.spans_overlapping(4, 11);
+        // (0,5): 0<11 && 5>4 ✓; (3,8): 3<11 && 8>4 ✓; (10,15): 10<11 && 15>4 ✓
+        assert_eq!(overlapping.len(), 3);
     }
 
     #[test]
     fn sorted_by_start() {
-        let g = DependencyGraph::new(&[span(10, 15), span(0, 5), span(3, 8)]);
-        let starts: Vec<usize> = g.spans.iter().map(|s| s.start).collect();
+        let graph = DependencyGraph::new(&[span(10, 15), span(0, 5), span(3, 8)]);
+        let starts: Vec<usize> = graph.spans.iter().map(|s| s.start).collect();
         assert_eq!(starts, vec![0, 3, 10]);
     }
 }

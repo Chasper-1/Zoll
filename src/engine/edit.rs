@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn delta_calc() {
-        let e = Edit::new(0, 3, b"12345");
-        assert_eq!(e.delta(), 2);
+        let edit = Edit::new(0, 3, b"12345");
+        assert_eq!(edit.delta(), 2);
     }
 }

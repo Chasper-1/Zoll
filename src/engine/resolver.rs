@@ -65,22 +65,22 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
     // Стек открытых inline-маркеров: (свойство, позиция открытия).
     let mut inline_stack: Vec<(SyntaxKind, usize)> = Vec::new();
 
-    for m in markers {
-        match m.byte {
+    for marker in markers {
+        match marker.byte {
             b'\n' => {
                 // Inline не выходит за пределы строки — сбрасываем.
                 inline_stack.clear();
             }
-            b')' if m.len() >= 2 => {
+            b')' if marker.len() >= 2 => {
                 // Универсальная inline-закрывашка.
                 if inline_stack.is_empty() {
                     continue; // нет открытого состояния — не закрывашка
                 }
                 // Правило пробелов: перед `))` не должно быть пробела.
-                if m.start > 0 && text[m.start - 1] == b' ' {
+                if marker.start > 0 && text[marker.start - 1] == b' ' {
                     continue;
                 }
-                let close_end = m.end;
+                let close_end = marker.end;
                 while let Some((kind, open_start)) = inline_stack.pop() {
                     spans.push(SyntaxSpan {
                         start: open_start,
@@ -91,19 +91,19 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
             }
             _ => {
                 // Line-маркеры — только в начале строки.
-                if is_line_start(m.start, line_map, text) {
-                    if let Some(span) = try_line_marker(text, m, line_map) {
+                if is_line_start(marker.start, line_map, text) {
+                    if let Some(span) = try_line_marker(text, marker, line_map) {
                         spans.push(span);
                         continue;
                     }
                 }
                 // Inline-открытие.
-                if let Some(kind) = inline_open(m.byte, m.len()) {
+                if let Some(kind) = inline_open(marker.byte, marker.len()) {
                     // Правило пробелов: после открывашки не должно быть пробела.
-                    if m.end < text.len() && text[m.end] == b' ' {
+                    if marker.end < text.len() && text[marker.end] == b' ' {
                         continue;
                     }
-                    inline_stack.push((kind, m.start));
+                    inline_stack.push((kind, marker.start));
                 }
             }
         }
@@ -117,7 +117,7 @@ fn is_line_start(pos: usize, line_map: &LineMap, text: &[u8]) -> bool {
     let (line_start, _) = line_map.line_bounds(line_map.line_at(pos));
     text[line_start..pos]
         .iter()
-        .all(|&b| b == b' ' || b == b'\t')
+        .all(|&byte| byte == b' ' || byte == b'\t')
 }
 
 /// Свойство inline-маркера по байту и длине последовательности.
@@ -138,17 +138,17 @@ fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
 }
 
 /// Line-маркер в начале строки.
-fn try_line_marker(text: &[u8], m: &Marker, line_map: &LineMap) -> Option<SyntaxSpan> {
-    let (line_start, line_end) = line_map.line_bounds(line_map.line_at(m.start));
+fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<SyntaxSpan> {
+    let (line_start, line_end) = line_map.line_bounds(line_map.line_at(marker.start));
     let line = &text[line_start..line_end.min(text.len())];
-    let rel = m.start - line_start; // позиция маркера внутри строки
+    let rel = marker.start - line_start; // позиция маркера внутри строки
 
-    match m.byte {
+    match marker.byte {
         b'#' => {
             // Тег `#:имя`
             if line.get(rel + 1) == Some(&b':') {
                 return Some(SyntaxSpan {
-                    start: m.start,
+                    start: marker.start,
                     end: line_end.min(text.len()),
                     kind: SyntaxKind::Tag,
                 });
@@ -158,15 +158,15 @@ fn try_line_marker(text: &[u8], m: &Marker, line_map: &LineMap) -> Option<Syntax
             let digits: String = after
                 .iter()
                 .take_while(|c| c.is_ascii_digit())
-                .map(|&b| b as char)
+                .map(|&byte| byte as char)
                 .collect();
             if !digits.is_empty() {
                 let level = digits.parse::<u32>().unwrap_or(1);
                 let rest = &after[digits.len()..];
-                if let Some(close_rel) = rest.iter().position(|&b| b == b'#') {
-                    let end = m.start + 1 + digits.len() + close_rel + 1;
+                if let Some(close_rel) = rest.iter().position(|&byte| byte == b'#') {
+                    let end = marker.start + 1 + digits.len() + close_rel + 1;
                     return Some(SyntaxSpan {
-                        start: m.start,
+                        start: marker.start,
                         end,
                         kind: SyntaxKind::Header(level),
                     });
@@ -174,36 +174,36 @@ fn try_line_marker(text: &[u8], m: &Marker, line_map: &LineMap) -> Option<Syntax
             }
             None
         }
-        b'%' if m.len() >= 2 => Some(SyntaxSpan {
-            start: m.start,
+        b'%' if marker.len() >= 2 => Some(SyntaxSpan {
+            start: marker.start,
             end: line_end.min(text.len()),
             kind: SyntaxKind::Comment,
         }),
-        b'!' if m.len() >= 2 => Some(SyntaxSpan {
-            start: m.start,
+        b'!' if marker.len() >= 2 => Some(SyntaxSpan {
+            start: marker.start,
             end: line_end.min(text.len()),
             kind: SyntaxKind::Spoiler,
         }),
-        b'$' if m.len() >= 2 => Some(SyntaxSpan {
-            start: m.start,
+        b'$' if marker.len() >= 2 => Some(SyntaxSpan {
+            start: marker.start,
             end: line_end.min(text.len()),
             kind: SyntaxKind::Formula,
         }),
         b'>' => Some(SyntaxSpan {
-            start: m.start,
+            start: marker.start,
             end: line_end.min(text.len()),
             kind: SyntaxKind::Quote,
         }),
         b'-' => {
-            if m.len() >= 3 && line == b"---" {
+            if marker.len() >= 3 && line == b"---" {
                 Some(SyntaxSpan {
-                    start: m.start,
-                    end: m.end,
+                    start: marker.start,
+                    end: marker.end,
                     kind: SyntaxKind::ThematicBreak,
                 })
-            } else if m.len() == 1 && m.end < text.len() && text[m.end] == b' ' {
+            } else if marker.len() == 1 && marker.end < text.len() && text[marker.end] == b' ' {
                 Some(SyntaxSpan {
-                    start: m.start,
+                    start: marker.start,
                     end: line_end.min(text.len()),
                     kind: SyntaxKind::ListItem,
                 })
@@ -212,9 +212,9 @@ fn try_line_marker(text: &[u8], m: &Marker, line_map: &LineMap) -> Option<Syntax
             }
         }
         b'*' | b'+' => {
-            if m.len() == 1 && m.end < text.len() && text[m.end] == b' ' {
+            if marker.len() == 1 && marker.end < text.len() && text[marker.end] == b' ' {
                 Some(SyntaxSpan {
-                    start: m.start,
+                    start: marker.start,
                     end: line_end.min(text.len()),
                     kind: SyntaxKind::ListItem,
                 })
@@ -223,7 +223,7 @@ fn try_line_marker(text: &[u8], m: &Marker, line_map: &LineMap) -> Option<Syntax
             }
         }
         b'|' => Some(SyntaxSpan {
-            start: m.start,
+            start: marker.start,
             end: line_end.min(text.len()),
             kind: SyntaxKind::TableRow,
         }),

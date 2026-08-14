@@ -29,6 +29,11 @@ pub fn scan(text: &[u8], targets: &[u8]) -> Vec<Event> {
             return unsafe { scan_sse2(text, targets) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON — базовый уровень AArch64, всегда доступен.
+        return unsafe { scan_neon(text, targets) };
+    }
     scan_scalar(text, targets)
 }
 
@@ -40,35 +45,35 @@ unsafe fn scan_avx2(text: &[u8], targets: &[u8]) -> Vec<Event> {
     unsafe {
         let mut events = Vec::new();
         let len = text.len();
-        let mut i = 0;
+        let mut offset = 0;
 
-        while i + 32 <= len {
-            let block = _mm256_loadu_si256(text.as_ptr().add(i) as *const __m256i);
+        while offset + 32 <= len {
+            let block = _mm256_loadu_si256(text.as_ptr().add(offset) as *const __m256i);
             let mut mask = _mm256_setzero_si256();
-            for &t in targets {
-                let needle = _mm256_set1_epi8(t as i8);
+            for &target in targets {
+                let needle = _mm256_set1_epi8(target as i8);
                 mask = _mm256_or_si256(mask, _mm256_cmpeq_epi8(block, needle));
             }
             let bits = _mm256_movemask_epi8(mask) as u32;
-            let mut b = bits;
-            while b != 0 {
-                let bit = b.trailing_zeros() as usize;
-                let pos = i + bit;
+            let mut remaining = bits;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let pos = offset + bit;
                 events.push(Event {
                     position: pos,
                     byte: text[pos],
                 });
-                b &= b - 1;
+                remaining &= remaining - 1;
             }
-            i += 32;
+            offset += 32;
         }
 
         // Хвост (меньше блока) — скалярно.
-        for j in i..len {
-            if targets.contains(&text[j]) {
+        for pos in offset..len {
+            if targets.contains(&text[pos]) {
                 events.push(Event {
-                    position: j,
-                    byte: text[j],
+                    position: pos,
+                    byte: text[pos],
                 });
             }
         }
@@ -84,34 +89,81 @@ unsafe fn scan_sse2(text: &[u8], targets: &[u8]) -> Vec<Event> {
     unsafe {
         let mut events = Vec::new();
         let len = text.len();
-        let mut i = 0;
+        let mut offset = 0;
 
-        while i + 16 <= len {
-            let block = _mm_loadu_si128(text.as_ptr().add(i) as *const __m128i);
+        while offset + 16 <= len {
+            let block = _mm_loadu_si128(text.as_ptr().add(offset) as *const __m128i);
             let mut mask = _mm_setzero_si128();
-            for &t in targets {
-                let needle = _mm_set1_epi8(t as i8);
+            for &target in targets {
+                let needle = _mm_set1_epi8(target as i8);
                 mask = _mm_or_si128(mask, _mm_cmpeq_epi8(block, needle));
             }
             let bits = _mm_movemask_epi8(mask) as u32;
-            let mut b = bits;
-            while b != 0 {
-                let bit = b.trailing_zeros() as usize;
-                let pos = i + bit;
+            let mut remaining = bits;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let pos = offset + bit;
                 events.push(Event {
                     position: pos,
                     byte: text[pos],
                 });
-                b &= b - 1;
+                remaining &= remaining - 1;
             }
-            i += 16;
+            offset += 16;
         }
 
-        for j in i..len {
-            if targets.contains(&text[j]) {
+        for pos in offset..len {
+            if targets.contains(&text[pos]) {
                 events.push(Event {
-                    position: j,
-                    byte: text[j],
+                    position: pos,
+                    byte: text[pos],
+                });
+            }
+        }
+        events
+    }
+}
+
+/// NEON (aarch64): блоки по 16 байт.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scan_neon(text: &[u8], targets: &[u8]) -> Vec<Event> {
+    use std::arch::aarch64::*;
+    unsafe {
+        let mut events = Vec::new();
+        let len = text.len();
+        let mut offset = 0;
+
+        while offset + 16 <= len {
+            let block = vld1q_u8(text.as_ptr().add(offset));
+            let mut mask = vdupq_n_u8(0);
+            for &target in targets {
+                let needle = vdupq_n_u8(target);
+                let eq = vceqq_u8(block, needle);
+                mask = vorrq_u8(mask, eq);
+            }
+            // mask: 0xFF на совпадении, 0x00 иначе. Собираем 16 бит из двух u64-лан.
+            let lo = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 0);
+            let hi = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
+            let bits = lo | (hi << 8);
+            let mut remaining = bits;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let pos = offset + bit;
+                events.push(Event {
+                    position: pos,
+                    byte: text[pos],
+                });
+                remaining &= remaining - 1;
+            }
+            offset += 16;
+        }
+
+        for pos in offset..len {
+            if targets.contains(&text[pos]) {
+                events.push(Event {
+                    position: pos,
+                    byte: text[pos],
                 });
             }
         }
@@ -122,11 +174,11 @@ unsafe fn scan_sse2(text: &[u8], targets: &[u8]) -> Vec<Event> {
 /// Скалярный фолбэк (не-x86 или без SIMD).
 fn scan_scalar(text: &[u8], targets: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
-    for (i, &b) in text.iter().enumerate() {
-        if targets.contains(&b) {
+    for (pos, &byte) in text.iter().enumerate() {
+        if targets.contains(&byte) {
             events.push(Event {
-                position: i,
-                byte: b,
+                position: pos,
+                byte,
             });
         }
     }
@@ -169,8 +221,8 @@ mod tests {
     fn events_sorted() {
         let text = b"x*y)z*w";
         let events = scan(text, b"*)");
-        for w in events.windows(2) {
-            assert!(w[0].position < w[1].position);
+        for pair in events.windows(2) {
+            assert!(pair[0].position < pair[1].position);
         }
     }
 

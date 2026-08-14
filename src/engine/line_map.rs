@@ -61,7 +61,7 @@ mod tests {
         let events: Vec<Event> = text
             .iter()
             .enumerate()
-            .filter(|&(_, &b)| b == b'\n')
+            .filter(|&(_, &byte)| byte == b'\n')
             .map(|(i, _)| Event {
                 position: i,
                 byte: b'\n',
@@ -72,30 +72,30 @@ mod tests {
 
     #[test]
     fn line_at_basic() {
-        let m = map(b"abc\ndef\nghi");
-        assert_eq!(m.line_at(0), 0);
-        assert_eq!(m.line_at(4), 1);
-        assert_eq!(m.line_at(8), 2);
+        let line_map = map(b"abc\ndef\nghi");
+        assert_eq!(line_map.line_at(0), 0);
+        assert_eq!(line_map.line_at(4), 1);
+        assert_eq!(line_map.line_at(8), 2);
     }
 
     #[test]
     fn line_bounds_basic() {
-        let m = map(b"abc\ndef\nghi");
-        assert_eq!(m.line_bounds(0), (0, 3));
-        assert_eq!(m.line_bounds(1), (4, 7));
-        assert_eq!(m.line_bounds(2), (8, usize::MAX));
+        let line_map = map(b"abc\ndef\nghi");
+        assert_eq!(line_map.line_bounds(0), (0, 3));
+        assert_eq!(line_map.line_bounds(1), (4, 7));
+        assert_eq!(line_map.line_bounds(2), (8, usize::MAX));
     }
 
     #[test]
     fn num_lines() {
-        let m = map(b"a\nb\nc");
-        assert_eq!(m.num_lines(), 3);
+        let line_map = map(b"a\nb\nc");
+        assert_eq!(line_map.num_lines(), 3);
     }
 
     #[test]
     fn empty() {
-        let m = map(b"");
-        assert_eq!(m.num_lines(), 1);
-        assert_eq!(m.line_bounds(0), (0, usize::MAX));
+        let line_map = map(b"");
+        assert_eq!(line_map.num_lines(), 1);
+        assert_eq!(line_map.line_bounds(0), (0, usize::MAX));
     }
 }
