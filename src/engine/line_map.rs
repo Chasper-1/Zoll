@@ -1,8 +1,6 @@
-//! Карта строк: строится из событий `\n` первичного потока.
+//! Карта строк: позиции `\n`, собранные в одном проходе с маркерами.
 //!
 //! Позволяет мгновенно перевести byte offset → номер строки и границы строки.
-
-use crate::engine::simd::Event;
 
 // Карта строк документа.
 #[derive(Debug, Clone, Default)]
@@ -12,13 +10,8 @@ pub struct LineMap {
 }
 
 impl LineMap {
-    // Построить карту из событий первичного потока.
-    pub fn from_events(events: &[Event]) -> Self {
-        let newline_positions = events
-            .iter()
-            .filter(|event| event.byte == b'\n')
-            .map(|event| event.position)
-            .collect();
+    // Карта из позиций `\n`, собранных в проходе парсинга.
+    pub fn new(newline_positions: Vec<usize>) -> Self {
         LineMap { newline_positions }
     }
 
@@ -58,16 +51,13 @@ mod tests {
     use super::*;
 
     fn map(text: &[u8]) -> LineMap {
-        let events: Vec<Event> = text
+        let positions = text
             .iter()
             .enumerate()
             .filter(|&(_, &byte)| byte == b'\n')
-            .map(|(pos, _)| Event {
-                position: pos,
-                byte: b'\n',
-            })
+            .map(|(pos, _)| pos)
             .collect();
-        LineMap::from_events(&events)
+        LineMap::new(positions)
     }
 
     #[test]

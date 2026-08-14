@@ -3,7 +3,7 @@
 //! | Группа | Что меряет | zoll | pulldown-cmark |
 //! |--------|-----------|:----:|:--------------:|
 //! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> |
-//! | `zoll_breakdown` | Этапы движка (scan/collect/resolve) | ✅ | — |
+//! | `zoll_breakdown` | scan (маски) vs полный проход | ✅ | — |
 //!
 //! Запуск:
 //!   cargo bench --bench compare
@@ -12,7 +12,7 @@
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use zoll::engine::{Engine, INTERESTING_BYTES, collect, resolve, scan};
+use zoll::engine::{Engine, INTERESTING_BYTES, scan};
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -145,9 +145,9 @@ fn bench_html_render(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── 3. Breakdown: этапы движка zoll ──────────────────────────
+// ─── 3. Breakdown движка zoll ─────────────────────────────────
 //
-// Из чего складывается время полного парсинга.
+// SIMD-скан (маски) против полного прохода — из чего складывается время.
 fn bench_zoll_breakdown(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let text = zoll_doc.as_bytes();
@@ -155,47 +155,20 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     let mut group = c.benchmark_group("zoll_breakdown");
     group.throughput(Throughput::Bytes(text.len() as u64));
 
-    group.bench_function("scan_simd", |b| {
+    // Только SIMD-скан: маски никуда не складываются.
+    group.bench_function("scan_masks", |b| {
         b.iter(|| {
-            black_box(scan(black_box(text), INTERESTING_BYTES));
+            let mut blocks = 0u32;
+            scan(black_box(text), INTERESTING_BYTES, |_, _| blocks += 1);
+            black_box(blocks);
         });
     });
 
-    // Сколько стоит владение буфером: копия документа в Engine::parse.
-    group.bench_function("copy_buffer", |b| {
+    // Полный парсинг: scan → маркеры → конструкции + карта строк + граф.
+    group.bench_function("engine_parse", |b| {
         b.iter(|| {
-            black_box(black_box(text).to_vec());
-        });
-    });
-
-    group.bench_function("build_line_map", |b| {
-        let events = scan(text, INTERESTING_BYTES);
-        b.iter(|| {
-            black_box(zoll::engine::LineMap::from_events(black_box(&events)));
-        });
-    });
-
-    group.bench_function("collect_markers", |b| {
-        let events = scan(text, INTERESTING_BYTES);
-        b.iter(|| {
-            black_box(collect(black_box(&events)));
-        });
-    });
-
-    group.bench_function("resolve_spans", |b| {
-        let events = scan(text, INTERESTING_BYTES);
-        let line_map = zoll::engine::LineMap::from_events(&events);
-        let markers = collect(&events);
-        b.iter(|| {
-            black_box(resolve(black_box(text), black_box(&markers), &line_map));
-        });
-    });
-
-    group.bench_function("build_dependency_graph", |b| {
-        let engine = Engine::parse(text);
-        let spans = &engine.spans;
-        b.iter(|| {
-            black_box(zoll::engine::DependencyGraph::new(black_box(spans)));
+            let engine = Engine::parse(black_box(text));
+            black_box(&engine.spans);
         });
     });
 
