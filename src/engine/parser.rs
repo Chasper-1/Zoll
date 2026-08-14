@@ -1,17 +1,15 @@
 //! Движок-парсер: публичный интерфейс `Engine`.
 //!
-//! Пайплайн — один проход по документу:
+//! Пайплайн:
 //!
 //! ```text
 //! байты документа
 //!     ↓
 //! SIMD-скан → битовые маски блоков   (simd::scan)
 //!     ↓
-//! группировка байтов в маркеры
+//! этап 1: регистры → готовые строки (карта `\n`)
 //!     ↓
-//! разбор маркера в конструкцию       (resolver::process_marker)
-//!   · \n → карта строк + сброс
-//!   · остальное → маркер/конструкция
+//! этап 2: грамматика на готовых строках (resolver::process_marker)
 //!     ↓
 //! синтаксические диапазоны (SyntaxSpan)
 //! ```
@@ -96,15 +94,33 @@ impl Engine {
     }
 }
 
-// Парсинг в один проход: маски → маркеры → конструкции + карта строк.
+// Парсинг в два этапа.
 //
-// Возвращает `(позиции \n, синтаксические диапазоны)`. Карта строк строится
-// здесь же: каждый `\n` сразу пишется в `newline_positions`.
+// Этап 1: регистры SIMD → готовые строки. Ищутся только `\n` — это карта
+// строк. Никакой логики языка.
+//
+// Этап 2: грамматика на готовых строках. Второй проход по маркерам: у
+// каждого маркера границы его строки (`line_start`, `line_end`) известны из
+// карты, поэтому line-маркерам не нужно ничего искать.
+//
+// Возвращает `(позиции \n, синтаксические диапазоны)`.
 pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
+    // ─── Этап 1: регистры SIMD → готовые строки ───
     let mut newline_positions: Vec<usize> = Vec::new();
-    let mut state = ResolveState::new(text);
+    scan(text, b"\n", |offset, mask| {
+        let mut remaining = mask;
+        while remaining != 0 {
+            let bit = remaining.trailing_zeros() as usize;
+            newline_positions.push(offset + bit);
+            remaining &= remaining - 1;
+        }
+    });
 
-    // Текущая строка: начинается сразу после последнего `\n`.
+    // ─── Этап 2: грамматика на готовых строках ───
+    let mut state = ResolveState::new(text);
+    state.line_end = newline_positions.first().copied().unwrap_or(text.len());
+    let mut line_idx = 0usize;
+
     // Текущий маркер: run подряд идущих одинаковых байтов.
     let mut run_byte: u8 = 0;
     let mut run_start: usize = 0;
@@ -129,12 +145,16 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
                 run_len = 0;
             }
             if byte == b'\n' {
-                // Карта строк строится здесь же, в одном проходе.
-                newline_positions.push(pos);
+                // Строка кончилась — берём следующую из готовой карты.
+                line_idx += 1;
+                state.line_start = pos + 1;
+                state.line_end = newline_positions
+                    .get(line_idx)
+                    .copied()
+                    .unwrap_or(text.len());
                 // Inline и line-level не выходят за строку — сбрасываем.
                 state.inline_stack.clear();
                 state.line_stack.clear();
-                state.line_start = pos + 1;
             } else {
                 run_byte = byte;
                 run_start = pos;

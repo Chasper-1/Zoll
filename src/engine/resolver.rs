@@ -2,8 +2,14 @@
 //! синтаксические диапазоны (`SyntaxSpan { start, end, kind }`) в байтовых
 //! координатах.
 //!
-//! Вызывается из одного прохода парсинга (`parser::parse_document`) на
-//! каждый завершённый маркер — отдельного этапа `collect`/`resolve` нет.
+//! Два отдельных этапа:
+//!
+//! 1. `parser::parse_document` делает из регистров SIMD готовые строки
+//!    (карта `\n`).
+//! 2. `process_marker` разбирает каждый маркер, и границы его строки
+//!    (`line_start`, `line_end`) уже готовы из карты.
+//!
+//! Никакого сканирования текста: всё, что нужно, уже найдено SIMD.
 //!
 //! ## Inline-маркеры
 //!
@@ -58,10 +64,12 @@ pub struct SyntaxSpan {
     pub kind: SyntaxKind,
 }
 
-// Состояние однопроходного разбора: текст, текущая строка, стеки и спаны.
+// Состояние разбора: текст, текущая строка, стеки и спаны.
 pub(crate) struct ResolveState<'a> {
     pub text: &'a [u8],
+    // Границы текущей строки — известны из карты строк (этап 1).
     pub line_start: usize,
+    pub line_end: usize,
     pub spans: Vec<SyntaxSpan>,
     pub inline_stack: Vec<(SyntaxKind, usize)>,
     pub line_stack: Vec<(SyntaxKind, usize)>,
@@ -72,6 +80,7 @@ impl<'a> ResolveState<'a> {
         ResolveState {
             text,
             line_start: 0,
+            line_end: text.len(),
             spans: Vec::new(),
             inline_stack: Vec::new(),
             line_stack: Vec::new(),
@@ -81,7 +90,9 @@ impl<'a> ResolveState<'a> {
 
 // Разбирает завершённый маркер `byte` длины `len`, начинающийся в `start`.
 //
-// Может не открыть/закрыть ничего: маркер просто игнорируется.
+// Границы текущей строки (`line_start`, `line_end`) уже готовы из карты
+// строк — сканировать текст не нужно. Может не открыть/закрыть ничего:
+// маркер просто игнорируется.
 pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
     let text = state.text;
     let end = start + len;
@@ -122,8 +133,17 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
         }
         b'.' => {
             // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
-            if let Some(span) = try_numbered_list(text, start, state.line_start) {
-                state.spans.push(span);
+            if start > state.line_start
+                && text[state.line_start..start]
+                    .iter()
+                    .all(|&byte| byte.is_ascii_digit())
+                && text.get(start + 1).is_none_or(|&byte| byte == b' ')
+            {
+                state.spans.push(SyntaxSpan {
+                    start: state.line_start,
+                    end: state.line_end,
+                    kind: SyntaxKind::ListItem,
+                });
             }
         }
         _ => {
@@ -136,14 +156,16 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
                 state.line_stack.push((kind, start));
                 return;
             }
-            // Line-маркеры — только в начале строки. Проверка «начало строки»
-            // дорогая (сканирование префикса), поэтому выполняется только для
-            // байтов, которые вообще могут быть line-маркерами.
-            if is_line_marker_byte(byte)
-                && is_line_start(start, state.line_start, text)
-                && let Some(span) = try_line_marker(text, byte, start, len, state.line_start)
+            // Line-маркеры — только в начале строки.
+            if start == state.line_start
+                && is_line_marker_byte(byte)
+                && let Some(kind) = try_line_marker(text, byte, start, len, state.line_end)
             {
-                state.spans.push(span);
+                state.spans.push(SyntaxSpan {
+                    start,
+                    end: state.line_end,
+                    kind,
+                });
                 return;
             }
             // Inline-открытие.
@@ -161,14 +183,6 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
 // Может ли байт быть line-маркером (заголовок/тег/цитата/список/таблица).
 fn is_line_marker_byte(byte: u8) -> bool {
     matches!(byte, b'#' | b'>' | b'|' | b'*' | b'-' | b'+')
-}
-
-// `true`, если байт `pos` — первая не-пробельная позиция своей строки.
-fn is_line_start(pos: usize, line_start: usize, text: &[u8]) -> bool {
-    pos == line_start
-        || text[line_start..pos]
-            .iter()
-            .all(|&byte| byte == b' ' || byte == b'\t')
 }
 
 // Свойство inline-маркера по байту и длине последовательности.
@@ -198,124 +212,56 @@ fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
     }
 }
 
-// Позиция конца строки: до следующего `\n` или конца текста.
-fn line_end_of(text: &[u8], from: usize) -> usize {
-    text[from..]
-        .iter()
-        .position(|&byte| byte == b'\n')
-        .map(|rel| from + rel)
-        .unwrap_or(text.len())
-}
-
-// Line-маркер в начале строки.
+// Line-маркер в начале строки. Конец строки `line_end` уже готов из карты
+// строк — сканировать текст не нужно.
 fn try_line_marker(
     text: &[u8],
     byte: u8,
     start: usize,
     len: usize,
-    line_start: usize,
-) -> Option<SyntaxSpan> {
-    let line_end = line_end_of(text, start);
-
+    line_end: usize,
+) -> Option<SyntaxKind> {
     match byte {
         b'#' => {
             // Тег `#:имя`
             if text.get(start + 1) == Some(&b':') {
-                return Some(SyntaxSpan {
-                    start,
-                    end: line_end,
-                    kind: SyntaxKind::Tag,
-                });
+                return Some(SyntaxKind::Tag);
             }
             // Заголовок `#N ` — цифры, затем пробел или конец строки.
             let after = &text[start + 1..line_end];
-            let digit_count = after
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit())
-                .count();
-            if digit_count > 0 {
-                let level: u32 = after[..digit_count]
-                    .iter()
-                    .map(|&byte| byte as char)
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(1);
-                let rest = &after[digit_count..];
+            let mut level: u32 = 0;
+            let mut digits = 0;
+            for &byte in after.iter().take_while(|b| b.is_ascii_digit()).take(9) {
+                level = level * 10 + (byte - b'0') as u32;
+                digits += 1;
+            }
+            if digits > 0 {
+                let rest = &after[digits..];
                 if rest.is_empty() || rest[0] == b' ' {
-                    return Some(SyntaxSpan {
-                        start,
-                        end: line_end,
-                        kind: SyntaxKind::Header(level),
-                    });
+                    return Some(SyntaxKind::Header(level));
                 }
             }
             None
         }
-        b'>' => Some(SyntaxSpan {
-            start,
-            end: line_end,
-            kind: SyntaxKind::Quote,
-        }),
+        b'>' => Some(SyntaxKind::Quote),
         b'-' => {
-            if len >= 3 && &text[line_start..line_end] == b"---" {
-                Some(SyntaxSpan {
-                    start,
-                    end: start + len,
-                    kind: SyntaxKind::ThematicBreak,
-                })
+            if len >= 3 && &text[start..line_end] == b"---" {
+                Some(SyntaxKind::ThematicBreak)
             } else if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
-                Some(SyntaxSpan {
-                    start,
-                    end: line_end,
-                    kind: SyntaxKind::ListItem,
-                })
+                Some(SyntaxKind::ListItem)
             } else {
                 None
             }
         }
         b'*' | b'+' => {
             if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
-                Some(SyntaxSpan {
-                    start,
-                    end: line_end,
-                    kind: SyntaxKind::ListItem,
-                })
+                Some(SyntaxKind::ListItem)
             } else {
                 None
             }
         }
-        b'|' => Some(SyntaxSpan {
-            start,
-            end: line_end,
-            kind: SyntaxKind::TableRow,
-        }),
+        b'|' => Some(SyntaxKind::TableRow),
         _ => None,
-    }
-}
-
-// Нумерованный список `1. ` — цифры от начала строки, затем пробел.
-fn try_numbered_list(text: &[u8], start: usize, line_start: usize) -> Option<SyntaxSpan> {
-    let line_end = line_end_of(text, start);
-    let line = &text[line_start..line_end];
-    let rel = start - line_start;
-    // Первая не-пробельная позиция строки — начало цифр.
-    let digits_start = line
-        .iter()
-        .position(|&byte| byte != b' ' && byte != b'\t')?;
-    // До `.` — только цифры, после — пробел или конец строки.
-    if digits_start < rel
-        && line[digits_start..rel]
-            .iter()
-            .all(|byte| byte.is_ascii_digit())
-        && line.get(rel + 1).is_none_or(|&byte| byte == b' ')
-    {
-        Some(SyntaxSpan {
-            start: line_start,
-            end: line_end,
-            kind: SyntaxKind::ListItem,
-        })
-    } else {
-        None
     }
 }
 
