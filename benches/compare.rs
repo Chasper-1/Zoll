@@ -18,7 +18,7 @@
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use zoll::engine::{Engine, INTERESTING_BYTES, scan};
+use zoll::engine::{Engine, INTERESTING_BYTES, scan, timing};
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -217,11 +217,33 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── 4. Тайминг по конструкциям ───────────────────────────────
+//
+// Один прогон с замером времени по каждому синтаксическому приколу.
+// Запуск с фичей: cargo bench --bench compare --features timing
+fn bench_zoll_timing(c: &mut Criterion) {
+    let zoll_doc = generate_zoll_doc(DOC_LINES);
+    let text = zoll_doc.as_bytes();
+
+    let mut group = c.benchmark_group("zoll_timing");
+    group.throughput(Throughput::Bytes(text.len() as u64));
+    timing::reset();
+    group.bench_function("engine_parse", |b| {
+        b.iter(|| {
+            let engine = Engine::parse(black_box(text));
+            black_box(&engine.spans);
+        });
+    });
+    group.finish();
+    timing::report();
+}
+
 criterion_group!(
     benches,
     bench_parse_spans,
     bench_html_render,
     bench_zoll_breakdown,
+    bench_zoll_timing,
 );
 
 criterion_main!(benches);

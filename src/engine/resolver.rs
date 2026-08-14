@@ -31,6 +31,8 @@
 //! Проверяются только в начале строки (контекст строки). Закрытие —
 //! явным `}` или автоматически на `\n`.
 
+use crate::engine::timing::{self, TimingKey};
+
 // Вид синтаксической конструкции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxKind {
@@ -94,10 +96,13 @@ impl<'a> ResolveState<'a> {
 // строк — сканировать текст не нужно. Может не открыть/закрыть ничего:
 // маркер просто игнорируется.
 pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
+    // Тайминг по конструкциям (фича `timing`; без неё — no-op, ноль оверхеда).
+    let timer = timing::begin();
     let text = state.text;
     let end = start + len;
     match byte {
         b')' if len >= 2 => {
+            timer.set(TimingKey::InlineClose);
             // Универсальная inline-закрывашка.
             if state.inline_stack.is_empty() {
                 return; // нет открытого состояния — не закрывашка
@@ -115,6 +120,7 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
             }
         }
         b'}' => {
+            timer.set(TimingKey::LineClose);
             // Контекстная line-level закрывашка: только при открытом состоянии.
             if state.line_stack.is_empty() {
                 return;
@@ -132,6 +138,7 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
             }
         }
         b'.' => {
+            timer.set(TimingKey::NumberedList);
             // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
             if start > state.line_start
                 && text[state.line_start..start]
@@ -149,6 +156,7 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
         _ => {
             // Line-level открытие — с любого места строки.
             if let Some(kind) = line_level_open(byte, len) {
+                timer.set(TimingKey::from_kind(kind));
                 // Правило пробелов: после маркера не должно быть пробела.
                 if end < text.len() && text[end] == b' ' {
                     return;
@@ -161,6 +169,7 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
                 && is_line_marker_byte(byte)
                 && let Some(kind) = try_line_marker(text, byte, start, len, state.line_end)
             {
+                timer.set(TimingKey::from_kind(kind));
                 state.spans.push(SyntaxSpan {
                     start,
                     end: state.line_end,
@@ -170,6 +179,7 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
             }
             // Inline-открытие.
             if let Some(kind) = inline_open(byte, len) {
+                timer.set(TimingKey::from_kind(kind));
                 // Правило пробелов: после открывашки не должно быть пробела.
                 if end < text.len() && text[end] == b' ' {
                     return;

@@ -174,7 +174,6 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
 mod tests {
     use super::*;
     use crate::engine::SyntaxKind;
-    use std::hint::black_box;
 
     #[test]
     fn parse_basic() {
@@ -220,77 +219,5 @@ mod tests {
         let engine = Engine::parse(b"a\nb\nc");
         assert_eq!(engine.line_map.num_lines(), 3);
         assert_eq!(engine.line_map.newline_positions, vec![1, 3]);
-    }
-
-    // Диагностика: сколько времени тратит парсинг.
-    // Запуск: cargo test --lib timing -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn timing_stages() {
-        use std::time::Instant;
-
-        // Репрезентативный документ: 5000 строк, вся палитра синтаксиса.
-        let mut doc = String::with_capacity(5000 * 80);
-        doc.push_str("#1 Timing Doc\n");
-        for i in 0..5000 {
-            match i % 12 {
-                0 => doc.push_str(&format!("#2 Section {}\n", i / 10)),
-                1 => doc.push_str(&format!(
-                    "This is **bold {})) and //italic {})) text\n",
-                    i, i
-                )),
-                2 => doc.push_str(&format!("- list item {} with **bold))\n", i)),
-                3 => doc.push_str(&format!("1. numbered item {} with //italic))\n", i)),
-                4 => doc.push_str(&format!("> quote line {} with ==highlight))\n", i)),
-                5 => doc.push_str(&format!("Plain text {} ~~strike)) __underline))\n", i)),
-                6 => doc.push_str(&format!("++insert)) --delete)) ''super)) ,,sub)) {}\n", i)),
-                7 => doc.push_str(&format!("visible text %%comment {}}}\n", i)),
-                8 => doc.push_str(&format!("text !!spoiler hidden {}}}\n", i)),
-                9 => doc.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-                10 => doc.push_str(&format!("x = {} $$sqrt({})}}\n", i, i)),
-                11 => doc.push_str(&format!("plain text line {}\n", i)),
-                _ => unreachable!(),
-            }
-        }
-        let text = doc.as_bytes();
-        println!("\nразмер документа: {} байт", text.len());
-
-        let total = Instant::now();
-        for _ in 0..5 {
-            Engine::parse(text);
-        }
-        let parse = total.elapsed() / 5;
-
-        // Только SIMD-скан: маски никуда не складываются.
-        let t = Instant::now();
-        for _ in 0..5 {
-            let mut blocks = 0u32;
-            scan(black_box(text), INTERESTING_BYTES, |_, _| blocks += 1);
-            black_box(blocks);
-        }
-        let scan_time = t.elapsed() / 5;
-
-        // Полный однопроходный парсинг без графа зависимостей и копии буфера.
-        let t = Instant::now();
-        for _ in 0..5 {
-            let (positions, spans) = parse_document(black_box(text));
-            black_box((positions, spans));
-        }
-        let pass_time = t.elapsed() / 5;
-
-        let t = Instant::now();
-        for _ in 0..5 {
-            black_box(black_box(text).to_vec());
-        }
-        let copy_time = t.elapsed() / 5;
-
-        println!("Engine::parse   {:>8.1} µs", parse.as_secs_f64() * 1e6);
-        println!("  scan (маски)  {:>8.1} µs", scan_time.as_secs_f64() * 1e6);
-        println!("  один проход   {:>8.1} µs", pass_time.as_secs_f64() * 1e6);
-        println!("  копия буфера  {:>8.1} µs", copy_time.as_secs_f64() * 1e6);
-        println!(
-            "  проход+копия+граф {:>6.1} µs",
-            (pass_time + copy_time).as_secs_f64() * 1e6
-        );
     }
 }
