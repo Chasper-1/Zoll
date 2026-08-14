@@ -4,15 +4,15 @@
 
 use crate::engine::simd::Event;
 
-/// Карта строк документа.
+// Карта строк документа.
 #[derive(Debug, Clone, Default)]
 pub struct LineMap {
-    /// Абсолютные позиции символов `\n` (по возрастанию).
+    // Абсолютные позиции символов `\n` (по возрастанию).
     pub newline_positions: Vec<usize>,
 }
 
 impl LineMap {
-    /// Построить карту из событий первичного потока.
+    // Построить карту из событий первичного потока.
     pub fn from_events(events: &[Event]) -> Self {
         let newline_positions = events
             .iter()
@@ -22,7 +22,7 @@ impl LineMap {
         LineMap { newline_positions }
     }
 
-    /// Номер строки (0-based), содержащей байт `byte`.
+    // Номер строки (0-based), содержащей байт `byte`.
     pub fn line_at(&self, byte: usize) -> usize {
         match self.newline_positions.binary_search(&byte) {
             Ok(index) => index,
@@ -30,9 +30,9 @@ impl LineMap {
         }
     }
 
-    /// Границы строки `line`: `(start, end)` — полуинтервал `[start, end)`.
-    ///
-    /// `end` — позиция `\n` (или `usize::MAX` для последней строки без `\n`).
+    // Границы строки `line`: `(start, end)` — полуинтервал `[start, end)`.
+    //
+    // `end` — позиция `\n` (или `usize::MAX` для последней строки без `\n`).
     pub fn line_bounds(&self, line: usize) -> (usize, usize) {
         let start = if line == 0 {
             0
@@ -47,7 +47,7 @@ impl LineMap {
         (start, end)
     }
 
-    /// Количество строк.
+    // Количество строк.
     pub fn num_lines(&self) -> usize {
         self.newline_positions.len() + 1
     }

@@ -6,10 +6,10 @@
 
 use crate::engine::resolver::SyntaxSpan;
 
-/// Граф зависимостей спанов.
+// Граф зависимостей спанов.
 #[derive(Debug, Clone, Default)]
 pub struct DependencyGraph {
-    /// Спаны, отсортированные по `(start, end)`.
+    // Спаны, отсортированные по `(start, end)`.
     spans: Vec<SyntaxSpan>,
 }
 
@@ -20,7 +20,7 @@ impl DependencyGraph {
         DependencyGraph { spans }
     }
 
-    /// Спаны, полностью лежащие в `[start, end)`.
+    // Спаны, полностью лежащие в `[start, end)`.
     pub fn spans_in(&self, start: usize, end: usize) -> Vec<&SyntaxSpan> {
         self.spans
             .iter()
@@ -28,7 +28,7 @@ impl DependencyGraph {
             .collect()
     }
 
-    /// Спаны, пересекающие `[start, end)`.
+    // Спаны, пересекающие `[start, end)`.
     pub fn spans_overlapping(&self, start: usize, end: usize) -> Vec<&SyntaxSpan> {
         self.spans
             .iter()

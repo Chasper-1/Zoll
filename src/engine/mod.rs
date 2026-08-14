@@ -28,6 +28,9 @@ mod line_map;
 mod resolver;
 mod simd;
 
+mod api;
+pub use api::*;
+
 pub use collector::{Marker, collect};
 pub use dependency::DependencyGraph;
 pub use edit::Edit;
@@ -70,6 +73,13 @@ impl Engine {
         }
     }
 
+    // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
+    pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
+        let engine = Self::parse(text);
+        sink.on_spans(engine.revision, &engine.spans);
+        engine
+    }
+
     /// Применить правку и пересобрать спаны.
     ///
     /// Инкремент revision на каждую правку. Сейчас пересобирается весь
@@ -84,6 +94,16 @@ impl Engine {
         self.spans = resolve(&self.text, &markers, &self.line_map);
         self.dependencies = DependencyGraph::new(&self.spans);
         &self.spans
+    }
+
+    // Применить правку и разослать новые спаны по ручке (fire-and-forget).
+    pub fn apply_edit_into(&mut self, edit: &Edit, sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
+        // apply_edit инкрементит revision ровно на 1 — считаем заранее,
+        // чтобы не читать self.revision под активным mutable-заимствованием.
+        let revision = self.revision + 1;
+        let spans = self.apply_edit(edit);
+        sink.on_spans(revision, spans);
+        spans
     }
 
     /// Номер строки по байтовой позиции.

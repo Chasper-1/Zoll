@@ -151,6 +151,13 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("build_line_map", |b| {
+        let events = scan(text, INTERESTING_BYTES);
+        b.iter(|| {
+            black_box(zoll::engine::LineMap::from_events(black_box(&events)));
+        });
+    });
+
     group.bench_function("collect_markers", |b| {
         let events = scan(text, INTERESTING_BYTES);
         b.iter(|| {
@@ -164,6 +171,14 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
         let markers = collect(&events);
         b.iter(|| {
             black_box(resolve(black_box(text), black_box(&markers), &line_map));
+        });
+    });
+
+    group.bench_function("build_dependency_graph", |b| {
+        let engine = Engine::parse(text);
+        let spans = &engine.spans;
+        b.iter(|| {
+            black_box(zoll::engine::DependencyGraph::new(black_box(&spans)));
         });
     });
 

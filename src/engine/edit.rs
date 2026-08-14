@@ -3,7 +3,7 @@
 //! Редактор сообщает изменение байтового буфера, а не клавиши:
 //! удалить `[position, position + delete_len)` и вставить `insert`.
 
-/// Изменение документа.
+// Изменение документа.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {
     pub position: usize,
@@ -20,12 +20,12 @@ impl Edit {
         }
     }
 
-    /// Изменение длины документа: `insert.len() - delete_len`.
+    // Изменение длины документа: `insert.len() - delete_len`.
     pub fn delta(&self) -> isize {
         self.insert.len() as isize - self.delete_len as isize
     }
 
-    /// Применить правку к буферу.
+    // Применить правку к буферу.
     pub fn apply(&self, text: &mut Vec<u8>) {
         let end = self
             .position

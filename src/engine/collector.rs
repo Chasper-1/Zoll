@@ -8,7 +8,7 @@
 
 use crate::engine::simd::Event;
 
-/// Последовательность одинаковых байтов: полуинтервал `[start, end)`.
+// Последовательность одинаковых байтов: полуинтервал `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Marker {
     pub start: usize,
@@ -17,7 +17,7 @@ pub struct Marker {
 }
 
 impl Marker {
-    /// Длина последовательности.
+    // Длина последовательности.
     pub fn len(&self) -> usize {
         self.end - self.start
     }
@@ -27,7 +27,7 @@ impl Marker {
     }
 }
 
-/// Группирует события в маркеры-последовательности.
+// Группирует события в маркеры-последовательности.
 pub fn collect(events: &[Event]) -> Vec<Marker> {
     let mut markers = Vec::new();
     let mut index = 0;

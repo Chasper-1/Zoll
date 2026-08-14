@@ -26,7 +26,7 @@
 use crate::engine::collector::Marker;
 use crate::engine::line_map::LineMap;
 
-/// Вид синтаксической конструкции.
+// Вид синтаксической конструкции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxKind {
     // Inline
@@ -51,7 +51,7 @@ pub enum SyntaxKind {
     ThematicBreak,
 }
 
-/// Синтаксический диапазон в байтовых координатах.
+// Синтаксический диапазон в байтовых координатах.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxSpan {
     pub start: usize,
@@ -59,7 +59,7 @@ pub struct SyntaxSpan {
     pub kind: SyntaxKind,
 }
 
-/// Разрешает маркеры в синтаксические диапазоны.
+// Разрешает маркеры в синтаксические диапазоны.
 pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<SyntaxSpan> {
     let mut spans = Vec::new();
     // Стек открытых inline-маркеров: (свойство, позиция открытия).
@@ -112,7 +112,7 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
     spans
 }
 
-/// `true`, если байт `pos` — первая не-пробельная позиция своей строки.
+// `true`, если байт `pos` — первая не-пробельная позиция своей строки.
 fn is_line_start(pos: usize, line_map: &LineMap, text: &[u8]) -> bool {
     let (line_start, _) = line_map.line_bounds(line_map.line_at(pos));
     text[line_start..pos]
@@ -120,7 +120,7 @@ fn is_line_start(pos: usize, line_map: &LineMap, text: &[u8]) -> bool {
         .all(|&byte| byte == b' ' || byte == b'\t')
 }
 
-/// Свойство inline-маркера по байту и длине последовательности.
+// Свойство inline-маркера по байту и длине последовательности.
 fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
         (b'*', 2) => Some(SyntaxKind::Bold),
@@ -137,7 +137,7 @@ fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
     }
 }
 
-/// Line-маркер в начале строки.
+// Line-маркер в начале строки.
 fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<SyntaxSpan> {
     let (line_start, line_end) = line_map.line_bounds(line_map.line_at(marker.start));
     let line = &text[line_start..line_end.min(text.len())];

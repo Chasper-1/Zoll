@@ -8,17 +8,17 @@
 //! SIMD-слой ничего не знает о синтаксисе Zoll — только «интересующие байты».
 //! Результат — поток событий `(position, byte)`, отсортированный по позиции.
 
-/// Событие первичного потока: найденный байт и его абсолютная позиция.
+// Событие первичного потока: найденный байт и его абсолютная позиция.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Event {
     pub position: usize,
     pub byte: u8,
 }
 
-/// Сканирует текст и возвращает позиции всех интересующих байтов.
-///
-/// Один проход, без потоков: SIMD умеет искать несколько символов за раз
-/// (cmpeq по каждому таргету, маски OR). Потоки не нужны.
+// Сканирует текст и возвращает позиции всех интересующих байтов.
+//
+// Один проход, без потоков: SIMD умеет искать несколько символов за раз
+// (cmpeq по каждому таргету, маски OR). Потоки не нужны.
 pub fn scan(text: &[u8], targets: &[u8]) -> Vec<Event> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -37,7 +37,7 @@ pub fn scan(text: &[u8], targets: &[u8]) -> Vec<Event> {
     scan_scalar(text, targets)
 }
 
-/// AVX2: блоки по 32 байта.
+// AVX2: блоки по 32 байта.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn scan_avx2(text: &[u8], targets: &[u8]) -> Vec<Event> {
@@ -81,7 +81,7 @@ unsafe fn scan_avx2(text: &[u8], targets: &[u8]) -> Vec<Event> {
     }
 }
 
-/// SSE2: блоки по 16 байт (базовый уровень x86-64).
+// SSE2: блоки по 16 байт (базовый уровень x86-64).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn scan_sse2(text: &[u8], targets: &[u8]) -> Vec<Event> {
@@ -124,7 +124,7 @@ unsafe fn scan_sse2(text: &[u8], targets: &[u8]) -> Vec<Event> {
     }
 }
 
-/// NEON (aarch64): блоки по 16 байт.
+// NEON (aarch64): блоки по 16 байт.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn scan_neon(text: &[u8], targets: &[u8]) -> Vec<Event> {
@@ -171,7 +171,7 @@ unsafe fn scan_neon(text: &[u8], targets: &[u8]) -> Vec<Event> {
     }
 }
 
-/// Скалярный фолбэк (не-x86 или без SIMD).
+// Скалярный фолбэк (не-x86 или без SIMD).
 fn scan_scalar(text: &[u8], targets: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
     for (pos, &byte) in text.iter().enumerate() {
