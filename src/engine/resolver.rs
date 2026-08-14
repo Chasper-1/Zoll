@@ -91,11 +91,11 @@ pub fn resolve(text: &[u8], markers: &[Marker], line_map: &LineMap) -> Vec<Synta
             }
             _ => {
                 // Line-маркеры — только в начале строки.
-                if is_line_start(marker.start, line_map, text) {
-                    if let Some(span) = try_line_marker(text, marker, line_map) {
-                        spans.push(span);
-                        continue;
-                    }
+                if is_line_start(marker.start, line_map, text)
+                    && let Some(span) = try_line_marker(text, marker, line_map)
+                {
+                    spans.push(span);
+                    continue;
                 }
                 // Inline-открытие.
                 if let Some(kind) = inline_open(marker.byte, marker.len()) {
@@ -157,7 +157,7 @@ fn try_line_marker(text: &[u8], marker: &Marker, line_map: &LineMap) -> Option<S
             let after = &line[rel + 1..];
             let digits: String = after
                 .iter()
-                .take_while(|c| c.is_ascii_digit())
+                .take_while(|byte| byte.is_ascii_digit())
                 .map(|&byte| byte as char)
                 .collect();
             if !digits.is_empty() {
@@ -340,13 +340,13 @@ mod tests {
     #[test]
     fn spoiler_line() {
         let spans = resolve_text("!!спойлер: текст");
-        assert!(spans.iter().any(|s| s.kind == SyntaxKind::Spoiler));
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
     }
 
     #[test]
     fn quote_and_list() {
         let spans = resolve_text("> цитата\n- элемент");
-        let kinds: Vec<SyntaxKind> = spans.iter().map(|s| s.kind).collect();
+        let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
         assert_eq!(kinds, vec![SyntaxKind::Quote, SyntaxKind::ListItem]);
     }
 
@@ -371,7 +371,7 @@ mod tests {
         assert!(
             !spans
                 .iter()
-                .any(|s| matches!(s.kind, SyntaxKind::Header(_) | SyntaxKind::Tag))
+                .any(|span| matches!(span.kind, SyntaxKind::Header(_) | SyntaxKind::Tag))
         );
     }
 

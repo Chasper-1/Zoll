@@ -16,8 +16,8 @@ impl LineMap {
     pub fn from_events(events: &[Event]) -> Self {
         let newline_positions = events
             .iter()
-            .filter(|e| e.byte == b'\n')
-            .map(|e| e.position)
+            .filter(|event| event.byte == b'\n')
+            .map(|event| event.position)
             .collect();
         LineMap { newline_positions }
     }
@@ -25,8 +25,8 @@ impl LineMap {
     /// Номер строки (0-based), содержащей байт `byte`.
     pub fn line_at(&self, byte: usize) -> usize {
         match self.newline_positions.binary_search(&byte) {
-            Ok(i) => i,
-            Err(i) => i,
+            Ok(index) => index,
+            Err(index) => index,
         }
     }
 
@@ -62,8 +62,8 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|&(_, &byte)| byte == b'\n')
-            .map(|(i, _)| Event {
-                position: i,
+            .map(|(pos, _)| Event {
+                position: pos,
                 byte: b'\n',
             })
             .collect();

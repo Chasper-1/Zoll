@@ -4,16 +4,11 @@ version = "0.2.5"
 edition = "2024"
 description = "Zoll markup language — lazy, line-level parser"
 
-[features]
-default = []
-benchmarks = []
-
 [dependencies]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 pulldown-cmark = "0.13"
-comrak = "0.34"
 
 [[bench]]
 name = "compare"

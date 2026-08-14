@@ -30,10 +30,10 @@ impl Marker {
 /// Группирует события в маркеры-последовательности.
 pub fn collect(events: &[Event]) -> Vec<Marker> {
     let mut markers = Vec::new();
-    let mut idx = 0;
-    while idx < events.len() {
-        let event = events[idx];
-        let mut next = idx + 1;
+    let mut index = 0;
+    while index < events.len() {
+        let event = events[index];
+        let mut next = index + 1;
         while next < events.len()
             && events[next].byte == event.byte
             && events[next].position == events[next - 1].position + 1
@@ -45,7 +45,7 @@ pub fn collect(events: &[Event]) -> Vec<Marker> {
             end: events[next - 1].position + 1,
             byte: event.byte,
         });
-        idx = next;
+        index = next;
     }
     markers
 }

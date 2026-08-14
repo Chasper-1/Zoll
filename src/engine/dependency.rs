@@ -16,7 +16,7 @@ pub struct DependencyGraph {
 impl DependencyGraph {
     pub fn new(spans: &[SyntaxSpan]) -> Self {
         let mut spans = spans.to_vec();
-        spans.sort_by_key(|s| (s.start, s.end));
+        spans.sort_by_key(|span| (span.start, span.end));
         DependencyGraph { spans }
     }
 
@@ -24,7 +24,7 @@ impl DependencyGraph {
     pub fn spans_in(&self, start: usize, end: usize) -> Vec<&SyntaxSpan> {
         self.spans
             .iter()
-            .filter(|s| s.start >= start && s.end <= end)
+            .filter(|span| span.start >= start && span.end <= end)
             .collect()
     }
 
@@ -32,7 +32,7 @@ impl DependencyGraph {
     pub fn spans_overlapping(&self, start: usize, end: usize) -> Vec<&SyntaxSpan> {
         self.spans
             .iter()
-            .filter(|s| s.start < end && s.end > start)
+            .filter(|span| span.start < end && span.end > start)
             .collect()
     }
 
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn sorted_by_start() {
         let graph = DependencyGraph::new(&[span(10, 15), span(0, 5), span(3, 8)]);
-        let starts: Vec<usize> = graph.spans.iter().map(|s| s.start).collect();
+        let starts: Vec<usize> = graph.spans.iter().map(|span| span.start).collect();
         assert_eq!(starts, vec![0, 3, 10]);
     }
 }

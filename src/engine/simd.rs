@@ -69,11 +69,11 @@ unsafe fn scan_avx2(text: &[u8], targets: &[u8]) -> Vec<Event> {
         }
 
         // Хвост (меньше блока) — скалярно.
-        for pos in offset..len {
-            if targets.contains(&text[pos]) {
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            if targets.contains(&byte) {
                 events.push(Event {
-                    position: pos,
-                    byte: text[pos],
+                    position: offset + rel,
+                    byte,
                 });
             }
         }
@@ -112,11 +112,11 @@ unsafe fn scan_sse2(text: &[u8], targets: &[u8]) -> Vec<Event> {
             offset += 16;
         }
 
-        for pos in offset..len {
-            if targets.contains(&text[pos]) {
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            if targets.contains(&byte) {
                 events.push(Event {
-                    position: pos,
-                    byte: text[pos],
+                    position: offset + rel,
+                    byte,
                 });
             }
         }
@@ -159,11 +159,11 @@ unsafe fn scan_neon(text: &[u8], targets: &[u8]) -> Vec<Event> {
             offset += 16;
         }
 
-        for pos in offset..len {
-            if targets.contains(&text[pos]) {
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            if targets.contains(&byte) {
                 events.push(Event {
-                    position: pos,
-                    byte: text[pos],
+                    position: offset + rel,
+                    byte,
                 });
             }
         }
@@ -193,7 +193,7 @@ mod tests {
     fn finds_interesting_bytes() {
         let text = b"a*b**c))d";
         let events = scan(text, b"*)");
-        let positions: Vec<usize> = events.iter().map(|e| e.position).collect();
+        let positions: Vec<usize> = events.iter().map(|event| event.position).collect();
         assert_eq!(positions, vec![1, 3, 4, 6, 7]);
         assert_eq!(events[0].byte, b'*');
         assert_eq!(events[3].byte, b')');
@@ -203,7 +203,7 @@ mod tests {
     fn finds_newlines() {
         let text = b"line1\nline2\n";
         let events = scan(text, b"\n");
-        let positions: Vec<usize> = events.iter().map(|e| e.position).collect();
+        let positions: Vec<usize> = events.iter().map(|event| event.position).collect();
         assert_eq!(positions, vec![5, 11]);
     }
 

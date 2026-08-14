@@ -28,18 +28,15 @@ mod line_map;
 mod resolver;
 mod simd;
 
-pub use collector::{collect, Marker};
+pub use collector::{Marker, collect};
 pub use dependency::DependencyGraph;
 pub use edit::Edit;
 pub use line_map::LineMap;
-pub use resolver::{resolve, SyntaxKind, SyntaxSpan};
-pub use simd::{scan, Event};
+pub use resolver::{SyntaxKind, SyntaxSpan, resolve};
+pub use simd::{Event, scan};
 
 /// Набор интересующих байтов: синтаксические + структурный `\n`.
-pub const INTERESTING_BYTES: &[u8] = &[
-    b'*', b'/', b'_', b'~', b'=', b'+', b'-', b'\'', b',', b'$',
-    b'%', b'!', b'#', b'>', b'|', b':', b')', b'}', b'\n',
-];
+pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:)}\n";
 
 /// Движок парсера.
 #[derive(Debug, Clone)]
