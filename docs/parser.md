@@ -71,16 +71,22 @@ position  byte
 Это является первым уровнем parser pipeline:
 
 текст
+
   ↓
 SIMD scan
+
   ↓
 register + mask + offset
+
   ↓
 (position, byte)
+
   ↓
 распознавание маркеров
+
   ↓
 синтаксические конструкции
+
   ↓
 зависимости и инкрементальный parsing
 
