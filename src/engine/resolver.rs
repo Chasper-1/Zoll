@@ -95,57 +95,78 @@ impl<'a> ResolveState<'a> {
 // Границы текущей строки (`line_start`, `line_end`) уже готовы из карты
 // строк — сканировать текст не нужно. Может не открыть/закрыть ничего:
 // маркер просто игнорируется.
-pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
+pub(crate) fn process_marker<const COUNT: bool>(
+    state: &mut ResolveState<'_>,
+    byte: u8,
+    start: usize,
+    len: usize,
+) {
     // Тайминг по конструкциям (фича `timing`; без неё — no-op, ноль оверхеда).
-    let timer = timing::begin();
+    let timer = timing::begin::<COUNT>();
     let text = state.text;
     let end = start + len;
     match byte {
         b')' if len >= 2 => {
             timer.set(TimingKey::InlineClose);
             // Универсальная inline-закрывашка.
+            timer.op();
             if state.inline_stack.is_empty() {
                 return; // нет открытого состояния — не закрывашка
             }
             // Правило пробелов: перед `))` не должно быть пробела.
+            timer.op();
             if start > 0 && text[start - 1] == b' ' {
                 return;
             }
             while let Some((kind, open_start)) = state.inline_stack.pop() {
+                timer.op();
                 state.spans.push(SyntaxSpan {
                     start: open_start,
                     end,
                     kind,
                 });
+                timer.op();
             }
         }
         b'}' => {
             timer.set(TimingKey::LineClose);
             // Контекстная line-level закрывашка: только при открытом состоянии.
+            timer.op();
             if state.line_stack.is_empty() {
                 return;
             }
             // Правило пробелов: перед `}` не должно быть пробела.
+            timer.op();
             if start > 0 && text[start - 1] == b' ' {
                 return;
             }
             if let Some((kind, open_start)) = state.line_stack.pop() {
+                timer.op();
                 state.spans.push(SyntaxSpan {
                     start: open_start,
                     end,
                     kind,
                 });
+                timer.op();
             }
         }
         b'.' => {
             timer.set(TimingKey::NumberedList);
             // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
-            if start > state.line_start
-                && text[state.line_start..start]
-                    .iter()
-                    .all(|&byte| byte.is_ascii_digit())
-                && text.get(start + 1).is_none_or(|&byte| byte == b' ')
-            {
+            timer.op();
+            let mut numbered = start > state.line_start;
+            if numbered {
+                for &byte in &text[state.line_start..start] {
+                    timer.op();
+                    if !byte.is_ascii_digit() {
+                        numbered = false;
+                        break;
+                    }
+                }
+            }
+            timer.op();
+            if numbered && text.get(start + 1).is_none_or(|&byte| byte == b' ') {
+                timer.op();
                 state.spans.push(SyntaxSpan {
                     start: state.line_start,
                     end: state.line_end,
@@ -155,36 +176,46 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
         }
         _ => {
             // Line-level открытие — с любого места строки.
+            timer.op();
             if let Some(kind) = line_level_open(byte, len) {
                 timer.set(TimingKey::from_kind(kind));
                 // Правило пробелов: после маркера не должно быть пробела.
+                timer.op();
                 if end < text.len() && text[end] == b' ' {
                     return;
                 }
                 state.line_stack.push((kind, start));
+                timer.op();
                 return;
             }
             // Line-маркеры — только в начале строки.
-            if start == state.line_start
-                && is_line_marker_byte(byte)
-                && let Some(kind) = try_line_marker(text, byte, start, len, state.line_end)
-            {
-                timer.set(TimingKey::from_kind(kind));
-                state.spans.push(SyntaxSpan {
-                    start,
-                    end: state.line_end,
-                    kind,
-                });
-                return;
+            timer.op();
+            if start == state.line_start && is_line_marker_byte(byte) {
+                timer.set(line_marker_key(byte));
+                if let Some(kind) = try_line_marker(&timer, text, byte, start, len, state.line_end)
+                {
+                    timer.set(TimingKey::from_kind(kind));
+                    state.spans.push(SyntaxSpan {
+                        start,
+                        end: state.line_end,
+                        kind,
+                    });
+                    timer.op();
+                    return;
+                }
+                timer.set(TimingKey::Ignored);
             }
             // Inline-открытие.
+            timer.op();
             if let Some(kind) = inline_open(byte, len) {
                 timer.set(TimingKey::from_kind(kind));
                 // Правило пробелов: после открывашки не должно быть пробела.
+                timer.op();
                 if end < text.len() && text[end] == b' ' {
                     return;
                 }
                 state.inline_stack.push((kind, start));
+                timer.op();
             }
         }
     }
@@ -193,6 +224,18 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
 // Может ли байт быть line-маркером (заголовок/тег/цитата/список/таблица).
 fn is_line_marker_byte(byte: u8) -> bool {
     matches!(byte, b'#' | b'>' | b'|' | b'*' | b'-' | b'+')
+}
+
+// Предварительный ключ line-маркера; уточняется после разбора.
+fn line_marker_key(byte: u8) -> TimingKey {
+    match byte {
+        b'#' => TimingKey::Header,
+        b'>' => TimingKey::Quote,
+        b'-' => TimingKey::ListItem,
+        b'*' | b'+' => TimingKey::ListItem,
+        b'|' => TimingKey::TableRow,
+        _ => TimingKey::Ignored,
+    }
 }
 
 // Свойство inline-маркера по байту и длине последовательности.
@@ -224,7 +267,8 @@ fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
 
 // Line-маркер в начале строки. Конец строки `line_end` уже готов из карты
 // строк — сканировать текст не нужно.
-fn try_line_marker(
+fn try_line_marker<const COUNT: bool>(
+    timer: &timing::MarkerTimer<COUNT>,
     text: &[u8],
     byte: u8,
     start: usize,
@@ -234,6 +278,7 @@ fn try_line_marker(
     match byte {
         b'#' => {
             // Тег `#:имя`
+            timer.op();
             if text.get(start + 1) == Some(&b':') {
                 return Some(SyntaxKind::Tag);
             }
@@ -242,35 +287,49 @@ fn try_line_marker(
             let mut level: u32 = 0;
             let mut digits = 0;
             for &byte in after.iter().take_while(|b| b.is_ascii_digit()).take(9) {
+                timer.op();
                 level = level * 10 + (byte - b'0') as u32;
                 digits += 1;
             }
+            timer.op();
             if digits > 0 {
                 let rest = &after[digits..];
+                timer.op();
                 if rest.is_empty() || rest[0] == b' ' {
                     return Some(SyntaxKind::Header(level));
                 }
             }
             None
         }
-        b'>' => Some(SyntaxKind::Quote),
+        b'>' => {
+            timer.op();
+            Some(SyntaxKind::Quote)
+        }
         b'-' => {
+            timer.op();
             if len >= 3 && &text[start..line_end] == b"---" {
                 Some(SyntaxKind::ThematicBreak)
-            } else if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
-                Some(SyntaxKind::ListItem)
             } else {
-                None
+                timer.op();
+                if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
+                    Some(SyntaxKind::ListItem)
+                } else {
+                    None
+                }
             }
         }
         b'*' | b'+' => {
+            timer.op();
             if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
                 Some(SyntaxKind::ListItem)
             } else {
                 None
             }
         }
-        b'|' => Some(SyntaxKind::TableRow),
+        b'|' => {
+            timer.op();
+            Some(SyntaxKind::TableRow)
+        }
         _ => None,
     }
 }
@@ -281,7 +340,7 @@ mod tests {
 
     // Прогоняет текст через однопроходный парсер.
     fn parse_spans(text: &str) -> Vec<SyntaxSpan> {
-        crate::engine::parser::parse_document(text.as_bytes()).1
+        crate::engine::parser::parse_document::<false>(text.as_bytes()).1
     }
 
     #[test]

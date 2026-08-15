@@ -45,7 +45,7 @@ pub struct Engine {
 impl Engine {
     // Разобрать документ целиком.
     pub fn parse(text: &[u8]) -> Self {
-        let (newline_positions, spans) = parse_document(text);
+        let (newline_positions, spans) = parse_document::<false>(text);
         let dependencies = DependencyGraph::new(&spans);
         Engine {
             text: text.to_vec(),
@@ -71,7 +71,7 @@ impl Engine {
         edit.apply(&mut self.text);
         self.revision += 1;
 
-        let (newline_positions, spans) = parse_document(&self.text);
+        let (newline_positions, spans) = parse_document::<false>(&self.text);
         self.line_map = LineMap::new(newline_positions);
         self.spans = spans;
         self.dependencies = DependencyGraph::new(&self.spans);
@@ -104,7 +104,7 @@ impl Engine {
 // карты, поэтому line-маркерам не нужно ничего искать.
 //
 // Возвращает `(позиции \n, синтаксические диапазоны)`.
-pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
+pub(crate) fn parse_document<const COUNT: bool>(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // ─── Этап 1: регистры SIMD → готовые строки ───
     let mut newline_positions: Vec<usize> = Vec::new();
     scan(text, b"\n", |offset, mask| {
@@ -141,7 +141,7 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
             }
             // Завершаем предыдущий маркер и разбираем его.
             if run_len > 0 {
-                process_marker(&mut state, run_byte, run_start, run_len);
+                process_marker::<COUNT>(&mut state, run_byte, run_start, run_len);
                 run_len = 0;
             }
             if byte == b'\n' {
@@ -164,7 +164,7 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
     });
     // Последний маркер документа.
     if run_len > 0 {
-        process_marker(&mut state, run_byte, run_start, run_len);
+        process_marker::<COUNT>(&mut state, run_byte, run_start, run_len);
     }
 
     (newline_positions, state.spans)

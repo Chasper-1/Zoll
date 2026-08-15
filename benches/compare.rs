@@ -190,6 +190,8 @@ fn bench_html_render(c: &mut Criterion) {
 // ─── 3. Breakdown движка zoll ─────────────────────────────────
 //
 // SIMD-скан (маски) против полного прохода — из чего складывается время.
+// После замера — подсчёт внутренних операций по конструкциям (отдельный
+// проход, парсер не трогает). Запуск с фичей: cargo bench --features timing
 fn bench_zoll_breakdown(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let text = zoll_doc.as_bytes();
@@ -215,26 +217,11 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     });
 
     group.finish();
-}
 
-// ─── 4. Тайминг по конструкциям ───────────────────────────────
-//
-// Один прогон с замером времени по каждому синтаксическому приколу.
-// Запуск с фичей: cargo bench --bench compare --features timing
-fn bench_zoll_timing(c: &mut Criterion) {
-    let zoll_doc = generate_zoll_doc(DOC_LINES);
-    let text = zoll_doc.as_bytes();
-
-    let mut group = c.benchmark_group("zoll_timing");
-    group.throughput(Throughput::Bytes(text.len() as u64));
+    // Подсчёт операций по конструкциям — отдельный проход, время парсинга
+    // не меняется (Engine::parse всегда идёт по чистому пути COUNT=false).
     timing::reset();
-    group.bench_function("engine_parse", |b| {
-        b.iter(|| {
-            let engine = Engine::parse(black_box(text));
-            black_box(&engine.spans);
-        });
-    });
-    group.finish();
+    timing::analyze(text);
     timing::report();
 }
 
@@ -243,7 +230,6 @@ criterion_group!(
     bench_parse_spans,
     bench_html_render,
     bench_zoll_breakdown,
-    bench_zoll_timing,
 );
 
 criterion_main!(benches);
