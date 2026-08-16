@@ -73,6 +73,9 @@ pub(crate) struct ResolveState<'a> {
     pub spans: Vec<SyntaxSpan>,
     pub inline_stack: Vec<(SyntaxKind, usize)>,
     pub line_stack: Vec<(SyntaxKind, usize)>,
+    // Блочные конструкции (%%%/$$$/!!!): переживают строки, закрываются
+    // `}` строго в начале строки.
+    pub block_stack: Vec<(SyntaxKind, usize)>,
 }
 
 impl<'a> ResolveState<'a> {
@@ -84,6 +87,7 @@ impl<'a> ResolveState<'a> {
             spans: Vec::new(),
             inline_stack: Vec::new(),
             line_stack: Vec::new(),
+            block_stack: Vec::new(),
         }
     }
 }
@@ -99,9 +103,28 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
     let end = start + len;
     match byte {
         b')' if len >= 2 => close_inline(state, start, end),
-        b'}' => close_line(state, start, end),
+        b'}' => close_brace(state, start, end),
         b'.' => numbered_list(state, start, end),
         _ => open_marker(state, byte, len, start, end),
+    }
+}
+
+// `}` — одна скобка для двух уровней, различие по позиции:
+// - в начале строки → закрытие блока (%%%/$$$/!!!)
+// - mid-line → закрытие line-level (%%/$$/!!)
+#[inline]
+fn close_brace(state: &mut ResolveState<'_>, start: usize, end: usize) {
+    if start == state.line_start {
+        // Блок: закрывается строго в начале строки, без правила пробелов.
+        if let Some((kind, open_start)) = state.block_stack.pop() {
+            state.spans.push(SyntaxSpan {
+                start: open_start,
+                end,
+                kind,
+            });
+        }
+    } else {
+        close_line(state, start, end);
     }
 }
 
@@ -168,10 +191,17 @@ fn numbered_list(state: &mut ResolveState<'_>, start: usize, end: usize) {
     }
 }
 
-// Открытие маркера: line-level, line-маркер или inline.
+// Открытие маркера: блок, line-level, line-маркер или inline.
 #[inline]
 fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize, end: usize) {
     let text = state.text;
+    // Блок (%%%/$$$/!!!) — строго в начале строки, len >= 3.
+    if start == state.line_start && len >= 3 {
+        if let Some(kind) = block_level_open(byte, len) {
+            state.block_stack.push((kind, start));
+            return;
+        }
+    }
     // Line-level открытие — с любого места строки.
     if let Some(kind) = line_level_open(byte, len) {
         // Правило пробелов: после маркера не должно быть пробела.
@@ -230,6 +260,17 @@ fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'%', 2) => Some(SyntaxKind::Comment),
         (b'$', 2) => Some(SyntaxKind::Formula),
         (b'!', 2) => Some(SyntaxKind::Spoiler),
+        _ => None,
+    }
+}
+
+// Свойство блочного маркера (%%%/$$$/!!!) — многострочный, закрывается
+// `}` строго в начале строки.
+fn block_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
+    match (byte, len) {
+        (b'%', 3) => Some(SyntaxKind::Comment),
+        (b'$', 3) => Some(SyntaxKind::Formula),
+        (b'!', 3) => Some(SyntaxKind::Spoiler),
         _ => None,
     }
 }
@@ -582,5 +623,77 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::Comment));
         assert!(kinds.contains(&SyntaxKind::Spoiler));
         assert!(kinds.contains(&SyntaxKind::Formula));
+    }
+
+    // ─── Блочные маркеры (%%%/$$$/!!!) ─────────────────────────
+
+    #[test]
+    fn block_comment_multiline() {
+        // %%% открывает блок, `}` в начале строки закрывает.
+        let spans = parse_spans("%%%\nскрыто\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Comment);
+    }
+
+    #[test]
+    fn block_formula_multiline() {
+        let spans = parse_spans("$$$\nx^2\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Formula);
+    }
+
+    #[test]
+    fn block_spoiler_with_title() {
+        // Заголовок внутри спана — редактор классифицирует диапазоном.
+        let spans = parse_spans("!!!спойлер:\nскрыто\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Spoiler);
+    }
+
+    #[test]
+    fn block_unclosed_discarded() {
+        // %%% без закрывающего `}` в начале строки — выбрасывается.
+        assert!(parse_spans("%%%\nскрыто").is_empty());
+    }
+
+    #[test]
+    fn block_close_without_open_discarded() {
+        // `}` в начале строки без открытого блока — не закрывашка.
+        assert!(parse_spans("текст\n}").is_empty());
+    }
+
+    #[test]
+    fn block_open_mid_line_ignored() {
+        // %%% не в начале строки — не блок.
+        assert!(parse_spans("текст %%%\nскрыто\n}").is_empty());
+    }
+
+    #[test]
+    fn block_open_indented_ignored() {
+        // Отступы запрещены: %%% не первый символ строки — не блок.
+        assert!(parse_spans(" %%%\nскрыто\n}").is_empty());
+    }
+
+    #[test]
+    fn block_close_indented_ignored() {
+        // `}` с отступом — не закрытие блока (блок остаётся открытым).
+        assert!(parse_spans("%%%\nскрыто\n }").is_empty());
+    }
+
+    #[test]
+    fn block_and_line_level_coexist() {
+        // Блок открыт, внутри строки line-level комментарий закрывается
+        // своей `}` mid-line, блок — своей в начале строки.
+        let spans = parse_spans("%%%\nтекст %%скрыто}\n}");
+        let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
+        assert_eq!(kinds, vec![SyntaxKind::Comment, SyntaxKind::Comment]);
+    }
+
+    #[test]
+    fn block_survives_multiple_lines() {
+        // Содержимое блока на нескольких строках — спан от %%% до `}`.
+        let spans = parse_spans("%%%\nстрока 1\nстрока 2\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Comment);
     }
 }

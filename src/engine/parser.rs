@@ -153,6 +153,7 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
                     .copied()
                     .unwrap_or(text.len());
                 // Inline и line-level не выходят за строку — сбрасываем.
+                // Блоки (block_stack) переживают строки.
                 state.inline_stack.clear();
                 state.line_stack.clear();
             } else {

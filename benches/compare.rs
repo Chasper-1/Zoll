@@ -5,6 +5,7 @@
 //! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> | — | ✅ Vec<BlockEvent> |
 //! | `html_render` | Парсинг + рендер в HTML | — | ✅ | ✅ | ✅ |
 //! | `zoll_breakdown` | scan (маски) vs полный проход | ✅ | — | — | — |
+//! | `full_markup` | Полная палитра конструкций (вкл. блочные) | ✅ | ✅ | — | ✅ |
 //!
 //! sparkdown (0.1.0) — HTML-only (scaffold, только абзацы), поэтому только
 //! в `html_render`. ferromark — стриминг событий без HTML (BlockParser),
@@ -84,6 +85,85 @@ fn generate_md_doc(lines: usize) -> String {
     s
 }
 
+// Генерирует zoll-документ с ПОЛНОЙ палитрой конструкций: все inline
+// (bold/italic/underline/strike/highlight/insert/delete/super/sub/formula),
+// все line-level (%%/$$/!! + спойлер с заголовком), все block-level
+// (%%%/$$$/!!!), структура (#N, #:тег, ---, списки, цитата, таблица).
+// Цикл из 16 секций: 13 однострочных + 3 блочных (по 3 строки) = 22 строки.
+fn generate_full_markup_doc(lines: usize) -> String {
+    let mut s = String::with_capacity(lines * 80);
+    s.push_str("#1 Full Markup Benchmark\n\n");
+    let cycles = lines * 16 / 22;
+    for i in 0..cycles {
+        let section = i % 16;
+        match section {
+            0 => s.push_str(&format!("#2 Section {}\n", i)),
+            1 => s.push_str(&format!(
+                "**bold {})) //italic {})) __underline{})) ~~strike{}))\n",
+                i, i, i, i
+            )),
+            2 => s.push_str(&format!(
+                "==highlight{})) ++insert{})) --delete{})) ''super{})) ,,sub{})) $x_{}))\n",
+                i, i, i, i, i, i
+            )),
+            3 => s.push_str(&format!("- list item {} with **bold))\n", i)),
+            4 => s.push_str(&format!("1. numbered item {} with //italic))\n", i)),
+            5 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
+            6 => s.push_str(&format!("#:tag{}\n", i)),
+            7 => s.push_str("---\n"),
+            8 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
+            9 => s.push_str(&format!("visible text %%comment {}}}\n", i)),
+            10 => s.push_str(&format!("x = {} $$sqrt({})}}\n", i, i)),
+            11 => s.push_str(&format!("text !!spoiler {}}}\n", i)),
+            12 => s.push_str(&format!("!!заголовок: скрытое {}}}\n", i)),
+            13 => s.push_str(&format!("%%%\nblock comment {}\n}}\n", i)),
+            14 => s.push_str(&format!("$$$\nblock formula {}\n}}\n", i)),
+            15 => s.push_str(&format!("!!!спойлер:\nblock spoiler {}\n}}\n", i)),
+            _ => unreachable!(),
+        }
+    }
+    s.push_str("#1 End of Document\n");
+    s
+}
+
+// Markdown-эквивалент полной палитры (для сравнения с другими парсерами).
+fn generate_full_markup_md(lines: usize) -> String {
+    let mut s = String::with_capacity(lines * 80);
+    s.push_str("# Full Markup Benchmark\n\n");
+    let cycles = lines * 16 / 22;
+    for i in 0..cycles {
+        let section = i % 16;
+        match section {
+            0 => s.push_str(&format!("## Section {}\n", i)),
+            1 => s.push_str(&format!(
+                "**bold {}** *italic {}* <u>underline {}</u> ~~strike {}~~\n",
+                i, i, i, i
+            )),
+            2 => s.push_str(&format!(
+                "<mark>highlight {}</mark> <ins>insert {}</ins> <del>delete {}</del> \
+                 <sup>super {}</sup> <sub>sub {}</sub> $x_{}$\n",
+                i, i, i, i, i, i
+            )),
+            3 => s.push_str(&format!("- list item {} with **bold**\n", i)),
+            4 => s.push_str(&format!("1. numbered item {} with *italic*\n", i)),
+            5 => s.push_str(&format!("> quote line {} with ==highlight==\n", i)),
+            6 => s.push_str(&format!("<!-- tag{} -->\n", i)),
+            7 => s.push_str("---\n"),
+            8 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
+            9 => s.push_str("<!-- comment -->\n"),
+            10 => s.push_str(&format!("$$ x = {} + y $$\n", i)),
+            11 => s.push_str(&format!("||spoiler hidden {}||\n", i)),
+            12 => s.push_str(&format!("||spoiler title: hidden {}||\n", i)),
+            13 => s.push_str(&format!("<!--\nblock comment {}\n-->\n", i)),
+            14 => s.push_str(&format!("$$\nblock formula {}\n$$\n", i)),
+            15 => s.push_str(&format!("||\nblock spoiler {}\n||\n", i)),
+            _ => unreachable!(),
+        }
+    }
+    s.push_str("# End of Document\n");
+    s
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  БЕНЧМАРКИ
 // ═══════════════════════════════════════════════════════════════
@@ -92,9 +172,13 @@ fn generate_md_doc(lines: usize) -> String {
 fn len_parse_spans(_c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
+    let full_zoll = generate_full_markup_doc(DOC_LINES);
+    let full_md = generate_full_markup_md(DOC_LINES);
 
-    eprintln!("Zoll: {} bytes", zoll_doc.len());
-    eprintln!("MD:   {} bytes", md_doc.len());
+    eprintln!("Zoll:        {} bytes", zoll_doc.len());
+    eprintln!("MD:          {} bytes", md_doc.len());
+    eprintln!("Zoll full:   {} bytes", full_zoll.len());
+    eprintln!("MD full:     {} bytes", full_md.len());
 }
 
 // ─── 1. Парсинг в плоский список ──────────────────────────────
@@ -226,12 +310,56 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── 4. Полная палитра конструкций ────────────────────────────
+//
+// Отдельный документ со ВСЕМИ конструкциями языка (включая блочные
+// %%%/$$$/!!!): позволяет сравнивать парсеры на полной разметке и знать
+// время для документа того же размера в строках, но с полной разметкой.
+fn bench_full_markup(c: &mut Criterion) {
+    let zoll_doc = generate_full_markup_doc(DOC_LINES);
+    let md_doc = generate_full_markup_md(DOC_LINES);
+
+    let mut group = c.benchmark_group("full_markup");
+
+    group.throughput(Throughput::Bytes(zoll_doc.len() as u64));
+    group.bench_function("zoll_engine_parse", |b| {
+        b.iter(|| {
+            let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
+            black_box(&engine.spans);
+        });
+    });
+
+    group.throughput(Throughput::Bytes(md_doc.len() as u64));
+    group.bench_function("pulldown_cmark_events", |b| {
+        b.iter(|| {
+            let events: Vec<pulldown_cmark::Event> =
+                pulldown_cmark::Parser::new(black_box(&md_doc)).collect();
+            black_box(events);
+        });
+    });
+
+    group.bench_function("ferromark_block_events", |b| {
+        b.iter(|| {
+            let mut parser = ferromark::block::BlockParser::new_with_options(
+                black_box(md_doc.as_bytes()),
+                ferromark::Options::commonmark(),
+            );
+            let mut events: Vec<ferromark::block::BlockEvent> = Vec::new();
+            parser.parse(&mut events);
+            black_box(events);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     len_parse_spans,
     bench_parse_spans,
-    bench_html_render,
     bench_zoll_breakdown,
+    bench_full_markup,
+    bench_html_render,
 );
 
 criterion_main!(benches);
