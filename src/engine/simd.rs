@@ -529,6 +529,36 @@ mod tests {
         assert_eq!(simd_events.len(), targets.len());
     }
 
+    #[test]
+    fn table_randomized_matches_scalar() {
+        // Детерминированный генератор (без rand): табличный путь обязан
+        // совпадать со скаляром на любых случайных входах и наборах целей.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        };
+        let target_sets: &[&[u8]] = &[
+            b"*/_~=+-',$%!#>|:.)}\n",
+            b"abc",
+            b"\x00\x7f",
+            b"",
+            b"*",
+            b"\x01\x02\x03\x04",
+        ];
+        for &targets in target_sets {
+            for _ in 0..300 {
+                let len = (next() as usize) % 100;
+                let text: Vec<u8> = (0..len).map(|_| next()).collect();
+                let simd = scan_events(&text, targets);
+                let scalar = scan_events_scalar(&text, targets);
+                assert_eq!(simd, scalar, "targets={targets:?} text={text:?}");
+            }
+        }
+    }
+
     // Скалярная версия без SIMD-диспетчера (для сверки).
     fn scan_events_scalar(text: &[u8], targets: &[u8]) -> Vec<(usize, u8)> {
         let mut events = Vec::new();
@@ -549,5 +579,62 @@ mod tests {
         let text = b"12345678901234567890123456789012*"; // 32 байта + 1 остаток
         let events = scan_events(text, b"*");
         assert_eq!(events, vec![(32, b'*')]);
+    }
+
+    // Замер в тактах: табличный путь vs cmpeq-путь (только x86_64 + AVX2).
+    // Запуск: cargo test --release cycle_compare -- --nocapture
+    #[test]
+    fn cycle_compare_table_vs_cmpeq() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::_rdtsc;
+            if !std::arch::is_x86_feature_detected!("avx2") {
+                eprintln!("AVX2 недоступен — пропуск");
+                return;
+            }
+            // Документ с плотной разметкой.
+            let mut text = Vec::new();
+            for i in 0..5000 {
+                text.extend_from_slice(
+                    format!("**bold {})) //italic {})) #1 h\n", i, i).as_bytes(),
+                );
+            }
+            let targets = b"*/_~=+-',$%!#>|:.)}\n";
+            let tables = build_tables(targets).unwrap();
+
+            // Прогрев.
+            for _ in 0..200 {
+                unsafe { scan_avx2_table(&text, tables, |_, _| {}) };
+                unsafe { scan_avx2(&text, targets, |_, _| {}) };
+            }
+
+            const ITERS: u64 = 3000;
+            let mut sink = 0u32;
+            let mut table_total = 0u64;
+            let mut cmpeq_total = 0u64;
+            for _ in 0..5 {
+                let t0 = unsafe { _rdtsc() };
+                for _ in 0..ITERS {
+                    unsafe { scan_avx2_table(&text, tables, |_, m| sink += m) };
+                }
+                let t1 = unsafe { _rdtsc() };
+                table_total += t1 - t0;
+
+                let t0 = unsafe { _rdtsc() };
+                for _ in 0..ITERS {
+                    unsafe { scan_avx2(&text, targets, |_, m| sink += m) };
+                }
+                let t1 = unsafe { _rdtsc() };
+                cmpeq_total += t1 - t0;
+            }
+            std::hint::black_box(sink);
+            let n = 5 * ITERS;
+            eprintln!(
+                "table: {:>8} тактов/итер | cmpeq: {:>8} тактов/итер | table/cmpeq = {:.2}",
+                table_total / n,
+                cmpeq_total / n,
+                table_total as f64 / cmpeq_total as f64
+            );
+        }
     }
 }
