@@ -1,9 +1,8 @@
 //! Этап 1: SIMD-поиск значимых байтов.
 //!
 //! Один проход по документу блоками 16/32 байта. Для каждого блока
-//! загружается регистр, для каждого интересующего байта выполняется
-//! `cmpeq`, маски объединяются через OR. Установленные биты маски —
-//! позиции найденных байтов внутри блока.
+//! загружается регистр и вычисляется битовая маска позиций интересующих
+//! байтов. Установленные биты маски — позиции найденных байтов внутри блока.
 //!
 //! Результат отдаётся сразу, без промежуточных векторов: на каждый блок
 //! вызывается `emit(offset, mask)`, где бит `i` установлен, если
@@ -13,17 +12,40 @@
 //! SIMD-слой не знает о синтаксисе Zoll: он только находит интересующие
 //! байты и отдаёт маски. Какой байт находится по установленному биту,
 //! решает потребитель (`text[offset + bit]`).
+//!
+//! ## Два способа поиска
+//!
+//! 1. **Табличный** (`pshufb`/`vtbl1q_u8`) — основной путь. Вместо `cmpeq`
+//!    на каждый целевой байт строится пара таблиц `E` и `BIT` (см.
+//!    `build_tables`), и каждый байт классифицируется по своим двум нибблам
+//!    за пару подстановок + AND. Точный, без ложных срабатываний. Требует
+//!    `pshufb` (SSSE3/AVX2) или `vtbl1q_u8` (NEON).
+//! 2. **`cmpeq`** — фолбэк для SSE2 (нет `pshufb`) и для наборов целей с
+//!    байтами ≥ `0x80` (старший ниббл 8–15 не влезает в 8-битную маску `E`).
 
 // Сканирует текст и передаёт битовую маску каждого блока в `emit`.
 //
 // Маска имеет фиксированный размер: `u32` на 32-байтный блок AVX2,
 // младшие 16 бит используются на 16-байтных блоках SSE2/NEON/скаляра.
 // Нулевые маски (в блоке нет интересующих байтов) не передаются.
+//
+// Выбирает табличный путь (`pshufb`/`vtbl1q_u8`), если архитектура его
+// поддерживает и все целевые байты < `0x80`; иначе — `cmpeq`-фолбэк.
 pub fn scan<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], emit: F) {
+    let tables = build_tables(targets);
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
+            if let Some(t) = tables {
+                return unsafe { scan_avx2_table(text, t, emit) };
+            }
             return unsafe { scan_avx2(text, targets, emit) };
+        }
+        if std::arch::is_x86_feature_detected!("ssse3") {
+            if let Some(t) = tables {
+                return unsafe { scan_ssse3_table(text, t, emit) };
+            }
+            return unsafe { scan_sse2(text, targets, emit) };
         }
         if std::arch::is_x86_feature_detected!("sse2") {
             return unsafe { scan_sse2(text, targets, emit) };
@@ -32,12 +54,115 @@ pub fn scan<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], emit: F) {
     #[cfg(target_arch = "aarch64")]
     {
         // NEON — базовый уровень AArch64, всегда доступен.
+        if let Some(t) = tables {
+            return unsafe { scan_neon_table(text, t, emit) };
+        }
         return unsafe { scan_neon(text, targets, emit) };
     }
     scan_scalar(text, targets, emit);
 }
 
-// AVX2: блоки по 32 байта.
+// Строит таблицы `E` и `BIT` для табличного поиска.
+//
+// `E[n]` — битовая маска валидных старших нибблов для младшего ниббла `n`
+// (бит `h` установлен ⟺ байт `(h << 4) | n` — цель). `BIT[n] = 1 << n`.
+//
+// Байт `b = (h << 4) | n` — цель ⟺ `E[n] & (1 << h) != 0`. Это точный тест
+// (без ложных срабатываний), т.к. проверяется конкретная пара нибблов.
+//
+// Возвращает `None`, если любой целевой байт ≥ `0x80`: старший ниббл 8–15
+// не влезает в 8-битную маску `E`. Тогда вызывающий использует `cmpeq`.
+fn build_tables(targets: &[u8]) -> Option<([u8; 16], [u8; 16])> {
+    let mut e = [0u8; 16];
+    for &t in targets {
+        if t >= 0x80 {
+            return None;
+        }
+        let hi = (t >> 4) as usize;
+        let lo = (t & 0x0F) as usize;
+        e[lo] |= 1 << hi;
+    }
+    // BIT[n] = 1 << n. Нужны только n 0..8 (старшие нибблы целей < 8).
+    let mut bit = [0u8; 16];
+    for i in 0..8 {
+        bit[i] = 1 << i;
+    }
+    Some((e, bit))
+}
+
+// AVX2: табличный путь, блоки по 32 байта.
+//
+// Старший ниббл извлекается через even/odd split (в AVX2 нет побайтового
+// сдвига): `srli_epi16` сдвигает 16-битные пары и портит нечётные байты,
+// поэтому нечётные байты сдвигаются отдельно (вектор на 1 байт влево) и
+// результаты склеиваются через `blendv`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_avx2_table<F: FnMut(usize, u32)>(
+    text: &[u8],
+    tables: ([u8; 16], [u8; 16]),
+    mut emit: F,
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let (e_table, bit_table) = tables;
+        let e_vec =
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(e_table.as_ptr() as *const __m128i));
+        let bit_vec =
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(bit_table.as_ptr() as *const __m128i));
+        // 0xFF на чётных позициях (0,2,...,30), 0 на нечётных.
+        let even_mask = _mm256_set_epi8(
+            0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0,
+            -1, 0, -1, 0, -1, 0, -1,
+        );
+        let zero = _mm256_setzero_si256();
+        let ones = _mm256_set1_epi8(-1);
+
+        let len = text.len();
+        let mut offset = 0;
+
+        while offset + 32 <= len {
+            let v = _mm256_loadu_si256(text.as_ptr().add(offset) as *const __m256i);
+
+            // Извлечение старшего ниббла каждого байта.
+            // srli_epi16(x,4) даёт верный старший ниббл на НЕчётных позициях
+            // (чётные портятся). Поэтому чётные байты сдвигаем в нечётные
+            // позиции (slli_si256 на 1), извлекаем и сдвигаем обратно.
+            let v_left = _mm256_slli_si256::<1>(v);
+            let hi_even = _mm256_srli_epi16::<4>(v_left);
+            let hi_even = _mm256_srli_si256::<1>(hi_even);
+            let hi_odd = _mm256_srli_epi16::<4>(v);
+            let hi = _mm256_blendv_epi8(hi_odd, hi_even, even_mask);
+
+            // Классификация: E[младший ниббл] & (1 << старший ниббл).
+            // shuffle_epi8(данные, индексы): данные = таблица, индексы = байты.
+            let code = _mm256_shuffle_epi8(e_vec, v);
+            let bit = _mm256_shuffle_epi8(bit_vec, hi);
+            let matchv = _mm256_and_si256(code, bit);
+            // Ненулевой → 0xFF.
+            let matchv = _mm256_xor_si256(_mm256_cmpeq_epi8(matchv, zero), ones);
+            let bits = _mm256_movemask_epi8(matchv) as u32;
+            if bits != 0 {
+                emit(offset, bits);
+            }
+            offset += 32;
+        }
+
+        // Остаток (меньше блока) — скалярно, той же таблицей.
+        let mut remainder_mask = 0u32;
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            let hi = (byte >> 4) as usize;
+            if byte < 0x80 && (e_table[(byte & 0x0F) as usize] & (1u8 << hi)) != 0 {
+                remainder_mask |= 1 << rel;
+            }
+        }
+        if remainder_mask != 0 {
+            emit(offset, remainder_mask);
+        }
+    }
+}
+
+// AVX2: cmpeq-фолбэк, блоки по 32 байта.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn scan_avx2<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit: F) {
@@ -64,6 +189,72 @@ unsafe fn scan_avx2<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit:
         let mut remainder_mask = 0u32;
         for (rel, &byte) in text[offset..].iter().enumerate() {
             if targets.contains(&byte) {
+                remainder_mask |= 1 << rel;
+            }
+        }
+        if remainder_mask != 0 {
+            emit(offset, remainder_mask);
+        }
+    }
+}
+
+// SSSE3: табличный путь, блоки по 16 байт.
+//
+// То же, что AVX2, но на 128-бит; blend через and/or (в SSSE3 нет `blendv`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn scan_ssse3_table<F: FnMut(usize, u32)>(
+    text: &[u8],
+    tables: ([u8; 16], [u8; 16]),
+    mut emit: F,
+) {
+    use std::arch::x86_64::*;
+    unsafe {
+        let (e_table, bit_table) = tables;
+        let e_vec = _mm_loadu_si128(e_table.as_ptr() as *const __m128i);
+        let bit_vec = _mm_loadu_si128(bit_table.as_ptr() as *const __m128i);
+        let even_mask = _mm_set_epi8(0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1);
+        let odd_mask = _mm_set_epi8(-1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0, -1, 0);
+        let zero = _mm_setzero_si128();
+        let ones = _mm_set1_epi8(-1);
+
+        let len = text.len();
+        let mut offset = 0;
+
+        while offset + 16 <= len {
+            let v = _mm_loadu_si128(text.as_ptr().add(offset) as *const __m128i);
+
+            // Извлечение старшего ниббла каждого байта.
+            // srli_epi16(x,4) даёт верный старший ниббл на НЕчётных позициях
+            // (чётные портятся). Поэтому чётные байты сдвигаем в нечётные
+            // позиции (slli_si128 на 1), извлекаем и сдвигаем обратно.
+            let v_left = _mm_slli_si128::<1>(v);
+            let hi_even = _mm_srli_epi16::<4>(v_left);
+            let hi_even = _mm_srli_si128::<1>(hi_even);
+            let hi_odd = _mm_srli_epi16::<4>(v);
+            let hi = _mm_or_si128(
+                _mm_and_si128(hi_even, even_mask),
+                _mm_and_si128(hi_odd, odd_mask),
+            );
+
+            // Классификация: E[младший ниббл] & (1 << старший ниббл).
+            // shuffle_epi8(данные, индексы): данные = таблица, индексы = байты.
+            let code = _mm_shuffle_epi8(e_vec, v);
+            let bit = _mm_shuffle_epi8(bit_vec, hi);
+            let matchv = _mm_and_si128(code, bit);
+            let matchv = _mm_xor_si128(_mm_cmpeq_epi8(matchv, zero), ones);
+            let bits = _mm_movemask_epi8(matchv) as u32;
+            if bits != 0 {
+                emit(offset, bits);
+            }
+            offset += 16;
+        }
+
+        // Остаток (меньше блока) — скалярно, той же таблицей.
+        let mut remainder_mask = 0u32;
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            let hi = (byte >> 4) as usize;
+            if byte < 0x80 && (e_table[(byte & 0x0F) as usize] & (1u8 << hi)) != 0 {
                 remainder_mask |= 1 << rel;
             }
         }
@@ -108,7 +299,63 @@ unsafe fn scan_sse2<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit:
     }
 }
 
-// NEON (aarch64): блоки по 16 байт.
+// NEON (aarch64): табличный путь, блоки по 16 байт.
+//
+// В NEON есть побайтовый сдвиг `vshrq_n_u8`, поэтому старший ниббл
+// извлекается одной операцией — без even/odd split.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn scan_neon_table<F: FnMut(usize, u32)>(
+    text: &[u8],
+    tables: ([u8; 16], [u8; 16]),
+    mut emit: F,
+) {
+    use std::arch::aarch64::*;
+    unsafe {
+        let (e_table, bit_table) = tables;
+        let e_vec = vld1q_u8(e_table.as_ptr());
+        let bit_vec = vld1q_u8(bit_table.as_ptr());
+        let zero = vdupq_n_u8(0);
+
+        let len = text.len();
+        let mut offset = 0;
+
+        while offset + 16 <= len {
+            let v = vld1q_u8(text.as_ptr().add(offset));
+
+            // Старший ниббл каждого байта — побайтовый сдвиг вправо на 4.
+            let hi = vshrq_n_u8(v, 4);
+            // Классификация: E[младший ниббл] & (1 << старший ниббл).
+            let code = vqtbl1q_u8(e_vec, v);
+            let bit = vqtbl1q_u8(bit_vec, hi);
+            let matchv = vandq_u8(code, bit);
+            // Ненулевой → 0xFF (unsigned > 0).
+            let matchv = vcgtq_u8(matchv, zero);
+            // Собираем 16 бит из двух u64-лан.
+            let lo = vgetq_lane_u64(vreinterpretq_u64_u8(matchv), 0);
+            let hi64 = vgetq_lane_u64(vreinterpretq_u64_u8(matchv), 1);
+            let bits = (lo | (hi64 << 8)) as u32;
+            if bits != 0 {
+                emit(offset, bits);
+            }
+            offset += 16;
+        }
+
+        // Остаток (меньше блока) — скалярно, той же таблицей.
+        let mut remainder_mask = 0u32;
+        for (rel, &byte) in text[offset..].iter().enumerate() {
+            let hi = (byte >> 4) as usize;
+            if byte < 0x80 && (e_table[(byte & 0x0F) as usize] & (1u8 << hi)) != 0 {
+                remainder_mask |= 1 << rel;
+            }
+        }
+        if remainder_mask != 0 {
+            emit(offset, remainder_mask);
+        }
+    }
+}
+
+// NEON (aarch64): cmpeq-фолбэк, блоки по 16 байт.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn scan_neon<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit: F) {
@@ -248,6 +495,38 @@ mod tests {
         });
         let scalar_events = scan_events_scalar(text, targets);
         assert_eq!(simd_events, scalar_events);
+    }
+
+    #[test]
+    fn table_no_false_positives() {
+        // Цифры, буквы, управляющие и байты ≥ 0x80 — не должны давать
+        // ложных срабатываний (табличный путь vs скаляр).
+        let text = b"abc123XYZ 456 \x00\x01\x7f\x80\xff !#*";
+        let targets = b"*/_~=+-',$%!#>|:.)}\n";
+        let simd_events = scan_events(text, targets);
+        let scalar_events = scan_events_scalar(text, targets);
+        assert_eq!(simd_events, scalar_events);
+    }
+
+    #[test]
+    fn table_fallback_high_bytes() {
+        // Цель ≥ 0x80 → build_tables возвращает None → cmpeq-фолбэк.
+        let text = b"a\x80b\x81c\x80";
+        let targets = b"\x80\x81";
+        let simd_events = scan_events(text, targets);
+        let scalar_events = scan_events_scalar(text, targets);
+        assert_eq!(simd_events, scalar_events);
+    }
+
+    #[test]
+    fn table_matches_all_targets() {
+        // Каждый целевой байт обязан находиться табличным путём.
+        let targets = b"*/_~=+-',$%!#>|:.)}\n";
+        let text: Vec<u8> = targets.to_vec();
+        let simd_events = scan_events(&text, targets);
+        let scalar_events = scan_events_scalar(&text, targets);
+        assert_eq!(simd_events, scalar_events);
+        assert_eq!(simd_events.len(), targets.len());
     }
 
     // Скалярная версия без SIMD-диспетчера (для сверки).
