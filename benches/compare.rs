@@ -18,7 +18,7 @@
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use zoll::engine::{Engine, INTERESTING_BYTES, scan, timing};
+use zoll::engine::{Engine, INTERESTING_BYTES, scan};
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -88,7 +88,6 @@ fn generate_md_doc(lines: usize) -> String {
 //  БЕНЧМАРКИ
 // ═══════════════════════════════════════════════════════════════
 
-
 // Функция для вывода размера документов в байтах перед бенчмарками, чтобы не тормозить и не искажать результаты.
 fn len_parse_spans(_c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
@@ -115,7 +114,6 @@ fn len_parse_spans(_c: &mut Criterion) {
 fn bench_parse_spans(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
-    
 
     let mut group = c.benchmark_group("parse_spans");
 
@@ -201,8 +199,6 @@ fn bench_html_render(c: &mut Criterion) {
 // ─── 3. Breakdown движка zoll ─────────────────────────────────
 //
 // SIMD-скан (маски) против полного прохода — из чего складывается время.
-// После замера — подсчёт внутренних операций по конструкциям (отдельный
-// проход, парсер не трогает). Запуск с фичей: cargo bench --features timing
 fn bench_zoll_breakdown(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let text = zoll_doc.as_bytes();
@@ -228,12 +224,6 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     });
 
     group.finish();
-
-    // Подсчёт операций по конструкциям — отдельный проход, время парсинга
-    // не меняется (Engine::parse всегда идёт по чистому пути COUNT=false).
-    timing::reset();
-    timing::analyze(text);
-    timing::report();
 }
 
 criterion_group!(

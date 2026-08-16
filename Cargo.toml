@@ -6,9 +6,6 @@ description = "Zoll markup language — lazy, line-level parser"
 
 [dependencies]
 
-[features]
-timing = []
-
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 pulldown-cmark = "0.13"

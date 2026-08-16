@@ -7,7 +7,6 @@ mod line_map;
 mod parser;
 mod resolver;
 mod simd;
-pub mod timing;
 
 pub use api::*;
 pub use dependency::DependencyGraph;
