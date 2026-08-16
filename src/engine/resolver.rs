@@ -92,94 +92,113 @@ impl<'a> ResolveState<'a> {
 //
 // Границы текущей строки (`line_start`, `line_end`) уже готовы из карты
 // строк — сканировать текст не нужно. Может не открыть/закрыть ничего:
-// маркер просто игнорируется.
+// маркер просто игнорируется. Тонкий диспетчер: каждая ветка — отдельная
+// функция (в release инлайнится, оверхеда нет).
+#[inline]
 pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
-    let text = state.text;
     let end = start + len;
     match byte {
-        b')' if len >= 2 => {
-            // Универсальная inline-закрывашка.
-            if state.inline_stack.is_empty() {
-                return; // нет открытого состояния — не закрывашка
-            }
-            // Правило пробелов: перед `))` не должно быть пробела.
-            if start > 0 && text[start - 1] == b' ' {
-                return;
-            }
-            while let Some((kind, open_start)) = state.inline_stack.pop() {
-                state.spans.push(SyntaxSpan {
-                    start: open_start,
-                    end,
-                    kind,
-                });
-            }
-        }
-        b'}' => {
-            // Контекстная line-level закрывашка: только при открытом состоянии.
-            if state.line_stack.is_empty() {
-                return;
-            }
-            // Правило пробелов: перед `}` не должно быть пробела.
-            if start > 0 && text[start - 1] == b' ' {
-                return;
-            }
-            if let Some((kind, open_start)) = state.line_stack.pop() {
-                state.spans.push(SyntaxSpan {
-                    start: open_start,
-                    end,
-                    kind,
-                });
-            }
-        }
-        b'.' => {
-            // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
-            let mut numbered = start > state.line_start;
-            if numbered {
-                for &byte in &text[state.line_start..start] {
-                    if !byte.is_ascii_digit() {
-                        numbered = false;
-                        break;
-                    }
-                }
-            }
-            if numbered && text.get(start + 1).is_none_or(|&byte| byte == b' ') {
-                state.spans.push(SyntaxSpan {
-                    start: state.line_start,
-                    end: state.line_end,
-                    kind: SyntaxKind::ListItem,
-                });
-            }
-        }
-        _ => {
-            // Line-level открытие — с любого места строки.
-            if let Some(kind) = line_level_open(byte, len) {
-                // Правило пробелов: после маркера не должно быть пробела.
-                if end < text.len() && text[end] == b' ' {
-                    return;
-                }
-                state.line_stack.push((kind, start));
-                return;
-            }
-            // Line-маркеры — только в начале строки.
-            if start == state.line_start && is_line_marker_byte(byte) {
-                if let Some(kind) = try_line_marker(text, byte, start, len, state.line_end) {
-                    state.spans.push(SyntaxSpan {
-                        start,
-                        end: state.line_end,
-                        kind,
-                    });
-                    return;
-                }
-            }
-            // Inline-открытие.
-            if let Some(kind) = inline_open(byte, len) {
-                // Правило пробелов: после открывашки не должно быть пробела.
-                if end < text.len() && text[end] == b' ' {
-                    return;
-                }
-                state.inline_stack.push((kind, start));
+        b')' if len >= 2 => close_inline(state, start, end),
+        b'}' => close_line(state, start, end),
+        b'.' => numbered_list(state, start, end),
+        _ => open_marker(state, byte, len, start, end),
+    }
+}
+
+// Универсальная inline-закрывашка `))`: закрывает все открытые inline.
+#[inline]
+fn close_inline(state: &mut ResolveState<'_>, start: usize, end: usize) {
+    let text = state.text;
+    // Нет открытого состояния — не закрывашка.
+    if state.inline_stack.is_empty() {
+        return;
+    }
+    // Правило пробелов: перед `))` не должно быть пробела.
+    if start > 0 && text[start - 1] == b' ' {
+        return;
+    }
+    while let Some((kind, open_start)) = state.inline_stack.pop() {
+        state.spans.push(SyntaxSpan {
+            start: open_start,
+            end,
+            kind,
+        });
+    }
+}
+
+// Контекстная line-level закрывашка `}`: только при открытом состоянии.
+#[inline]
+fn close_line(state: &mut ResolveState<'_>, start: usize, end: usize) {
+    let text = state.text;
+    if state.line_stack.is_empty() {
+        return;
+    }
+    // Правило пробелов: перед `}` не должно быть пробела.
+    if start > 0 && text[start - 1] == b' ' {
+        return;
+    }
+    if let Some((kind, open_start)) = state.line_stack.pop() {
+        state.spans.push(SyntaxSpan {
+            start: open_start,
+            end,
+            kind,
+        });
+    }
+}
+
+// Нумерованный список `1. ` — цифры от начала строки, затем пробел.
+#[inline]
+fn numbered_list(state: &mut ResolveState<'_>, start: usize, end: usize) {
+    let text = state.text;
+    let mut numbered = start > state.line_start;
+    if numbered {
+        for &byte in &text[state.line_start..start] {
+            if !byte.is_ascii_digit() {
+                numbered = false;
+                break;
             }
         }
+    }
+    if numbered && text.get(start + 1).is_none_or(|&byte| byte == b' ') {
+        state.spans.push(SyntaxSpan {
+            start: state.line_start,
+            end: state.line_end,
+            kind: SyntaxKind::ListItem,
+        });
+    }
+}
+
+// Открытие маркера: line-level, line-маркер или inline.
+#[inline]
+fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize, end: usize) {
+    let text = state.text;
+    // Line-level открытие — с любого места строки.
+    if let Some(kind) = line_level_open(byte, len) {
+        // Правило пробелов: после маркера не должно быть пробела.
+        if end < text.len() && text[end] == b' ' {
+            return;
+        }
+        state.line_stack.push((kind, start));
+        return;
+    }
+    // Line-маркеры — только в начале строки.
+    if start == state.line_start && is_line_marker_byte(byte) {
+        if let Some(kind) = try_line_marker(text, byte, start, len, state.line_end) {
+            state.spans.push(SyntaxSpan {
+                start,
+                end: state.line_end,
+                kind,
+            });
+            return;
+        }
+    }
+    // Inline-открытие.
+    if let Some(kind) = inline_open(byte, len) {
+        // Правило пробелов: после открывашки не должно быть пробела.
+        if end < text.len() && text[end] == b' ' {
+            return;
+        }
+        state.inline_stack.push((kind, start));
     }
 }
 
