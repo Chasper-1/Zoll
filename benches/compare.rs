@@ -88,6 +88,16 @@ fn generate_md_doc(lines: usize) -> String {
 //  БЕНЧМАРКИ
 // ═══════════════════════════════════════════════════════════════
 
+
+// Функция для вывода размера документов в байтах перед бенчмарками, чтобы не тормозить и не искажать результаты.
+fn len_parse_spans(_c: &mut Criterion) {
+    let zoll_doc = generate_zoll_doc(DOC_LINES);
+    let md_doc = generate_md_doc(DOC_LINES);
+
+    eprintln!("Zoll: {} bytes", zoll_doc.len());
+    eprintln!("MD:   {} bytes", md_doc.len());
+}
+
 // ─── 1. Парсинг в плоский список ──────────────────────────────
 //
 // zoll: `Engine::parse` → `Vec<SyntaxSpan>` (байтовые диапазоны).
@@ -105,6 +115,7 @@ fn generate_md_doc(lines: usize) -> String {
 fn bench_parse_spans(c: &mut Criterion) {
     let zoll_doc = generate_zoll_doc(DOC_LINES);
     let md_doc = generate_md_doc(DOC_LINES);
+    
 
     let mut group = c.benchmark_group("parse_spans");
 
@@ -227,6 +238,7 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    len_parse_spans,
     bench_parse_spans,
     bench_html_render,
     bench_zoll_breakdown,
