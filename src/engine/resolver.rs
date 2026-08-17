@@ -213,7 +213,9 @@ fn try_numbered_list(state: &mut ResolveState<'_>, start: usize) {
 }
 
 // Открытие маркера: блок, line-close, line (not-close) или inline.
-#[inline]
+// inline(always): вызывается только из process_marker; инлайн закрепляет
+// выигрыш, который иначе зависит от случайного распределения codegen-юнитов.
+#[inline(always)]
 fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize, end: usize) {
     let text = state.text;
     // Блок (%%%/$$$/!!!/@@) — строго в начале строки.
