@@ -61,10 +61,12 @@ pub enum SyntaxKind {
     FormulaLine,
     CommentLine,
     SpoilerLine,
+    CodeLine,
     // Block
     FormulaBlock,
     CommentBlock,
     SpoilerBlock,
+    CodeBlock,
     Metadata,
 }
 
@@ -292,6 +294,7 @@ fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'$', 2) => Some(SyntaxKind::FormulaLine),
         (b'!', 2) => Some(SyntaxKind::SpoilerLine),
         (b'>', 1) => Some(SyntaxKind::Quote),
+        (b'`', 2) => Some(SyntaxKind::CodeLine),
         _ => None,
     }
 }
@@ -304,6 +307,7 @@ fn is_line_close_kind(kind: SyntaxKind) -> bool {
             | SyntaxKind::FormulaLine
             | SyntaxKind::SpoilerLine
             | SyntaxKind::Quote
+            | SyntaxKind::CodeLine
     )
 }
 
@@ -314,6 +318,7 @@ fn block_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'%', 3) => Some(SyntaxKind::CommentBlock),
         (b'$', 3) => Some(SyntaxKind::FormulaBlock),
         (b'!', 3) => Some(SyntaxKind::SpoilerBlock),
+        (b'`', 3) => Some(SyntaxKind::CodeBlock),
         (b'@', 2) => Some(SyntaxKind::Metadata),
         _ => None,
     }
@@ -546,6 +551,35 @@ mod tests {
     }
 
     #[test]
+    fn code_line() {
+        // ``код} — строка кода до }, без пробелов
+        // "``" = 2 + "код" = 6 + "}" = 1 → 9 байт
+        let spans = parse_spans("``код}");
+        assert_eq!(
+            spans,
+            vec![SyntaxSpan {
+                start: 0,
+                end: 9,
+                kind: SyntaxKind::CodeLine
+            }]
+        );
+    }
+
+    #[test]
+    fn code_line_unclosed_to_end_of_line() {
+        // `` без } — line-close действует до конца строки
+        let spans = parse_spans("``код");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::CodeLine);
+    }
+
+    #[test]
+    fn code_line_space_after_marker_invalid() {
+        // пробел после `` — не код (правило «без пробелов»)
+        assert!(parse_spans("`` код}").is_empty());
+    }
+
+    #[test]
     fn comment_space_before_close_goes_to_eol() {
         // пробел перед } — не закрывашка, комментарий идёт до конца строки
         let spans = parse_spans("%%скрыто }");
@@ -746,6 +780,7 @@ mod tests {
             ("$$sqrt(x)}", SyntaxKind::FormulaLine),
             ("!!спойлер}", SyntaxKind::SpoilerLine),
             ("!!заголовок:текст}", SyntaxKind::SpoilerLine),
+            ("``код}", SyntaxKind::CodeLine),
         ];
         for (text, expected) in cases {
             let spans = parse_spans(text);
@@ -859,6 +894,32 @@ mod tests {
     fn block_close_indented_ignored() {
         // `}` с отступом — не закрытие блока (блок остаётся открытым).
         assert!(parse_spans("%%%\nскрыто\n }").is_empty());
+    }
+
+    #[test]
+    fn code_block_multiline() {
+        // ``` открывает блок, `}` в начале строки закрывает.
+        let spans = parse_spans("```\nкод\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::CodeBlock);
+    }
+
+    #[test]
+    fn code_block_unclosed_discarded() {
+        // ``` без закрывающего `}` в начале строки — выбрасывается.
+        assert!(parse_spans("```\nкод").is_empty());
+    }
+
+    #[test]
+    fn code_block_open_mid_line_ignored() {
+        // ``` не в начале строки — не блок.
+        assert!(parse_spans("текст ```\nкод\n}").is_empty());
+    }
+
+    #[test]
+    fn code_block_open_indented_ignored() {
+        // Отступы запрещены: ``` не первый символ строки — не блок.
+        assert!(parse_spans(" ```\nкод\n}").is_empty());
     }
 
     #[test]

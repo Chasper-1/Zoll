@@ -56,10 +56,12 @@ pub trait SpanSink {
     fn on_formula_line(&mut self, start: usize, end: usize);
     fn on_comment_line(&mut self, start: usize, end: usize);
     fn on_spoiler_line(&mut self, start: usize, end: usize);
+    fn on_code_line(&mut self, start: usize, end: usize);
     // ─── Block ───
     fn on_formula_block(&mut self, start: usize, end: usize);
     fn on_comment_block(&mut self, start: usize, end: usize);
     fn on_spoiler_block(&mut self, start: usize, end: usize);
+    fn on_code_block(&mut self, start: usize, end: usize);
     fn on_metadata(&mut self, start: usize, end: usize);
     // Конец пачки.
     fn end_revision(&mut self);
@@ -95,9 +97,11 @@ pub(crate) fn dispatch_spans(sink: &mut dyn SpanSink, revision: u64, spans: &[Sy
             SyntaxKind::FormulaLine => sink.on_formula_line(span.start, span.end),
             SyntaxKind::CommentLine => sink.on_comment_line(span.start, span.end),
             SyntaxKind::SpoilerLine => sink.on_spoiler_line(span.start, span.end),
+            SyntaxKind::CodeLine => sink.on_code_line(span.start, span.end),
             SyntaxKind::FormulaBlock => sink.on_formula_block(span.start, span.end),
             SyntaxKind::CommentBlock => sink.on_comment_block(span.start, span.end),
             SyntaxKind::SpoilerBlock => sink.on_spoiler_block(span.start, span.end),
+            SyntaxKind::CodeBlock => sink.on_code_block(span.start, span.end),
             SyntaxKind::Metadata => sink.on_metadata(span.start, span.end),
         }
     }
@@ -325,6 +329,13 @@ mod tests {
                 kind: SyntaxKind::SpoilerLine,
             });
         }
+        fn on_code_line(&mut self, start: usize, end: usize) {
+            self.batches.last_mut().unwrap().1.push(SyntaxSpan {
+                start,
+                end,
+                kind: SyntaxKind::CodeLine,
+            });
+        }
         fn on_formula_block(&mut self, start: usize, end: usize) {
             self.batches.last_mut().unwrap().1.push(SyntaxSpan {
                 start,
@@ -344,6 +355,13 @@ mod tests {
                 start,
                 end,
                 kind: SyntaxKind::SpoilerBlock,
+            });
+        }
+        fn on_code_block(&mut self, start: usize, end: usize) {
+            self.batches.last_mut().unwrap().1.push(SyntaxSpan {
+                start,
+                end,
+                kind: SyntaxKind::CodeBlock,
             });
         }
         fn on_metadata(&mut self, start: usize, end: usize) {
@@ -414,7 +432,8 @@ mod tests {
             batches: Vec::new(),
         };
         Engine::parse_into(
-            "#1 Заголовок\n%скрыто)) %%скрыто}\n%%%\nблок\n}\n`код))".as_bytes(),
+            "#1 Заголовок\n%скрыто)) %%скрыто}\n%%%\nблок\n}\n`код))\n``строка}\n```\nблок\n}\n"
+                .as_bytes(),
             &mut sink,
         );
         let kinds: Vec<SyntaxKind> = sink.batches[0].1.iter().map(|span| span.kind).collect();
@@ -426,6 +445,8 @@ mod tests {
                 SyntaxKind::CommentLine,
                 SyntaxKind::CommentBlock,
                 SyntaxKind::CodeInline,
+                SyntaxKind::CodeLine,
+                SyntaxKind::CodeBlock,
             ]
         );
     }
