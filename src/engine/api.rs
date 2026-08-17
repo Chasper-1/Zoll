@@ -122,7 +122,7 @@ impl EngineHandle {
 
     // Текущие синтаксические диапазоны (в байтах).
     pub fn spans(&self) -> &[SyntaxSpan] {
-        &self.engine.spans
+        self.engine.spans()
     }
 
     // Номер строки (0-based) по байтовой позиции.
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(sink.batches[0].0, 0);
         assert_eq!(sink.batches[0].1.len(), 1);
         assert_eq!(sink.batches[0].1[0].kind, SyntaxKind::Bold);
-        assert_eq!(engine.spans.len(), 1);
+        assert_eq!(engine.spans().len(), 1);
     }
 
     #[test]

@@ -205,7 +205,7 @@ fn bench_parse_spans(c: &mut Criterion) {
     group.bench_function("zoll_engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
-            black_box(&engine.spans);
+            black_box(engine.spans());
         });
     });
 
@@ -303,7 +303,7 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
     group.bench_function("engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(text));
-            black_box(&engine.spans);
+            black_box(engine.spans());
         });
     });
 
@@ -325,7 +325,7 @@ fn bench_full_markup(c: &mut Criterion) {
     group.bench_function("zoll_engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
-            black_box(&engine.spans);
+            black_box(engine.spans());
         });
     });
 

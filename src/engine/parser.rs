@@ -30,16 +30,15 @@ pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@\n";
 //
 // Текст движок не хранит: парсинг — чистая функция «буфер → карта строк +
 // спаны». Буфером владеет редактор; после каждой своей правки он отдаёт
-// движку новый буфер через `reparse`.
+// движку новый буфер через `reparse`. Спаны хранятся в одной копии —
+// внутри графа зависимостей.
 #[derive(Debug, Clone)]
 pub struct Engine {
     // Номер версии документа (раздел 17 спеки).
     pub revision: u64,
     // Карта строк.
     pub line_map: LineMap,
-    // Синтаксические диапазоны.
-    pub spans: Vec<SyntaxSpan>,
-    // Граф зависимостей спанов.
+    // Граф зависимостей спанов (единственная копия спанов).
     pub dependencies: DependencyGraph,
 }
 
@@ -47,19 +46,17 @@ impl Engine {
     // Разобрать документ целиком.
     pub fn parse(text: &[u8]) -> Self {
         let (newline_positions, spans) = parse_document(text);
-        let dependencies = DependencyGraph::new(&spans);
         Engine {
             revision: 0,
             line_map: LineMap::new(newline_positions),
-            spans,
-            dependencies,
+            dependencies: DependencyGraph::new(spans),
         }
     }
 
     // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
     pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
         let engine = Self::parse(text);
-        dispatch_spans(sink, engine.revision, &engine.spans);
+        dispatch_spans(sink, engine.revision, engine.spans());
         engine
     }
 
@@ -73,9 +70,13 @@ impl Engine {
         self.revision += 1;
         let (newline_positions, spans) = parse_document(text);
         self.line_map = LineMap::new(newline_positions);
-        self.spans = spans;
-        self.dependencies = DependencyGraph::new(&self.spans);
-        &self.spans
+        self.dependencies = DependencyGraph::new(spans);
+        self.dependencies.spans()
+    }
+
+    // Синтаксические диапазоны в порядке построения.
+    pub fn spans(&self) -> &[SyntaxSpan] {
+        self.dependencies.spans()
     }
 
     // Номер строки по байтовой позиции.
@@ -166,8 +167,8 @@ mod tests {
     #[test]
     fn parse_basic() {
         let engine = Engine::parse("**жирный))".as_bytes());
-        assert_eq!(engine.spans.len(), 1);
-        assert_eq!(engine.spans[0].kind, SyntaxKind::Bold);
+        assert_eq!(engine.spans().len(), 1);
+        assert_eq!(engine.spans()[0].kind, SyntaxKind::Bold);
         assert_eq!(engine.revision, 0);
     }
 
@@ -181,10 +182,10 @@ mod tests {
     #[test]
     fn reparse_creates_new_spans() {
         let mut engine = Engine::parse(b"plain");
-        assert!(engine.spans.is_empty());
+        assert!(engine.spans().is_empty());
         engine.reparse(b"**bold))");
-        assert_eq!(engine.spans.len(), 1);
-        assert_eq!(engine.spans[0].kind, SyntaxKind::Bold);
+        assert_eq!(engine.spans().len(), 1);
+        assert_eq!(engine.spans()[0].kind, SyntaxKind::Bold);
     }
 
     #[test]
