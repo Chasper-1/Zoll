@@ -158,15 +158,6 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
                     .get(line_index)
                     .copied()
                     .unwrap_or(text.len());
-                // Незакрытые line-close (%%/$$/!!) действуют до конца
-                // строки: диапазон от маркера до `\n`.
-                for (kind, open_position) in state.line_close_stack.drain(..) {
-                    state.spans.push(SyntaxSpan {
-                        start: open_position,
-                        end: pos,
-                        kind,
-                    });
-                }
                 // Inline не выходит за строку — сбрасываем.
                 state.inline_stack.clear();
             } else {
@@ -180,15 +171,6 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
     if marker_len > 0 {
         process_marker(&mut state, marker_byte, marker_start, marker_len);
     }
-    // Конец документа: незакрытые line-close действуют до конца текста.
-    for (kind, open_position) in state.line_close_stack.drain(..) {
-        state.spans.push(SyntaxSpan {
-            start: open_position,
-            end: text.len(),
-            kind,
-        });
-    }
-
     (newline_positions, state.spans)
 }
 
