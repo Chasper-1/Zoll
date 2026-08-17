@@ -15,13 +15,10 @@
 //! ```
 //!
 //! Единая координатная система — абсолютная позиция в байтах.
-//! Редактор получает исходный буфер и диапазоны в byte offsets.
-
-use std::borrow::Cow;
+//! Буфером владеет редактор; движок получает диапазоны в byte offsets.
 
 use crate::engine::api::{SpanSink, dispatch_spans};
 use crate::engine::dependency::DependencyGraph;
-use crate::engine::edit::Edit;
 use crate::engine::line_map::LineMap;
 use crate::engine::resolver::{ResolveState, SyntaxSpan, process_marker};
 use crate::engine::simd::scan;
@@ -30,11 +27,12 @@ use crate::engine::simd::scan;
 pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@\n";
 
 // Движок парсера.
+//
+// Текст движок не хранит: парсинг — чистая функция «буфер → карта строк +
+// спаны». Буфером владеет редактор; после каждой своей правки он отдаёт
+// движку новый буфер через `reparse`.
 #[derive(Debug, Clone)]
-pub struct Engine<'a> {
-    // Исходный буфер документа: ссылка на буфер редактора (движок его
-    // не меняет); при первой правке копируется (copy-on-write).
-    pub text: Cow<'a, [u8]>,
+pub struct Engine {
     // Номер версии документа (раздел 17 спеки).
     pub revision: u64,
     // Карта строк.
@@ -45,13 +43,12 @@ pub struct Engine<'a> {
     pub dependencies: DependencyGraph,
 }
 
-impl<'a> Engine<'a> {
+impl Engine {
     // Разобрать документ целиком.
-    pub fn parse(text: &'a [u8]) -> Self {
+    pub fn parse(text: &[u8]) -> Self {
         let (newline_positions, spans) = parse_document(text);
         let dependencies = DependencyGraph::new(&spans);
         Engine {
-            text: Cow::Borrowed(text),
             revision: 0,
             line_map: LineMap::new(newline_positions),
             spans,
@@ -60,48 +57,30 @@ impl<'a> Engine<'a> {
     }
 
     // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
-    pub fn parse_into(text: &'a [u8], sink: &mut dyn SpanSink) -> Self {
+    pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
         let engine = Self::parse(text);
         dispatch_spans(sink, engine.revision, &engine.spans);
         engine
     }
 
-    // Вставить текст в позицию и пересобрать спаны.
+    // Пересобрать спаны из нового буфера редактора.
     //
-    // Инкремент revision на каждую правку. Сейчас пересобирается весь
-    // документ; оптимизация «только затронутые блоки» — следующий шаг.
-    pub fn insert(&mut self, position: usize, bytes: &[u8]) -> &[SyntaxSpan] {
-        self.apply_edit(&Edit::new(position, 0, bytes))
-    }
-
-    // Удалить кусок `[position, position + len)` и пересобрать спаны.
-    pub fn delete(&mut self, position: usize, len: usize) -> &[SyntaxSpan] {
-        self.apply_edit(&Edit::new(position, len, b""))
-    }
-
-    // Заменить кусок `[position, position + len)` на `bytes` и пересобрать
-    // спаны.
-    pub fn replace(&mut self, position: usize, len: usize, bytes: &[u8]) -> &[SyntaxSpan] {
-        self.apply_edit(&Edit::new(position, len, bytes))
+    // Редактор сам применяет правку к своему буферу и отдаёт движку
+    // результат. Инкремент revision на каждую пересборку. Сейчас
+    // пересобирается весь документ; оптимизация «только затронутые
+    // блоки» — следующий шаг.
+    pub fn reparse(&mut self, text: &[u8]) -> &[SyntaxSpan] {
+        self.revision += 1;
+        let (newline_positions, spans) = parse_document(text);
+        self.line_map = LineMap::new(newline_positions);
+        self.spans = spans;
+        self.dependencies = DependencyGraph::new(&self.spans);
+        &self.spans
     }
 
     // Номер строки по байтовой позиции.
     pub fn line_at(&self, byte: usize) -> usize {
         self.line_map.line_at(byte)
-    }
-
-    // Внутренний путь: применить правку к буферу и пересобрать спаны.
-    fn apply_edit(&mut self, edit: &Edit) -> &[SyntaxSpan] {
-        // При первом редактировании заимствованный буфер копируется —
-        // буфер редактора движок не меняет.
-        edit.apply(self.text.to_mut());
-        self.revision += 1;
-
-        let (newline_positions, spans) = parse_document(self.text.as_ref());
-        self.line_map = LineMap::new(newline_positions);
-        self.spans = spans;
-        self.dependencies = DependencyGraph::new(&self.spans);
-        &self.spans
     }
 }
 
@@ -193,26 +172,25 @@ mod tests {
     }
 
     #[test]
-    fn edit_bumps_revision() {
+    fn reparse_bumps_revision() {
         let mut engine = Engine::parse(b"hello");
-        engine.insert(5, b" world");
+        engine.reparse(b"hello world");
         assert_eq!(engine.revision, 1);
-        assert_eq!(engine.text.as_ref(), &b"hello world"[..]);
     }
 
     #[test]
-    fn edit_creates_new_spans() {
+    fn reparse_creates_new_spans() {
         let mut engine = Engine::parse(b"plain");
         assert!(engine.spans.is_empty());
-        engine.insert(0, b"**bold))");
+        engine.reparse(b"**bold))");
         assert_eq!(engine.spans.len(), 1);
         assert_eq!(engine.spans[0].kind, SyntaxKind::Bold);
     }
 
     #[test]
-    fn line_at_after_edit() {
+    fn line_at_after_reparse() {
         let mut engine = Engine::parse(b"a\nb");
-        engine.insert(2, b"c\n");
+        engine.reparse(b"a\nc\nb");
         assert_eq!(engine.line_at(3), 1);
     }
 

@@ -103,13 +103,13 @@ pub(crate) fn dispatch_spans(sink: &mut dyn SpanSink, revision: u64, spans: &[Sy
 }
 
 // Ручка на движок — единственный объект, который держит редактор.
-pub struct EngineHandle<'a> {
-    engine: Engine<'a>,
+pub struct EngineHandle {
+    engine: Engine,
 }
 
-impl<'a> EngineHandle<'a> {
+impl EngineHandle {
     // Разобрать документ с нуля (revision = 0).
-    pub fn parse(text: &'a [u8]) -> Self {
+    pub fn parse(text: &[u8]) -> Self {
         EngineHandle {
             engine: Engine::parse(text),
         }
@@ -140,47 +140,15 @@ impl<'a> EngineHandle<'a> {
         self.engine.dependencies.spans_overlapping(start, end)
     }
 
-    // Вставить текст в позицию, пересобрать и разослать по ручке.
+    // Пересобрать спаны из нового буфера редактора и разослать по ручке.
     //
+    // Редактор сам применил правку к своему буферу и отдаёт результат.
     // Fire-and-forget: результат уходит в sink, движок не ждёт ответа.
-    pub fn insert(
-        &mut self,
-        position: usize,
-        bytes: &[u8],
-        sink: &mut dyn SpanSink,
-    ) -> &[SyntaxSpan] {
+    pub fn reparse(&mut self, text: &[u8], sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
         // revision инкрементится ровно на 1 — считаем заранее, чтобы не
         // читать self.engine.revision под активным mutable-заимствованием.
         let revision = self.engine.revision + 1;
-        let spans = self.engine.insert(position, bytes);
-        dispatch_spans(sink, revision, spans);
-        spans
-    }
-
-    // Удалить кусок [position, position + len), пересобрать и разослать.
-    pub fn delete(
-        &mut self,
-        position: usize,
-        len: usize,
-        sink: &mut dyn SpanSink,
-    ) -> &[SyntaxSpan] {
-        let revision = self.engine.revision + 1;
-        let spans = self.engine.delete(position, len);
-        dispatch_spans(sink, revision, spans);
-        spans
-    }
-
-    // Заменить кусок [position, position + len) на bytes, пересобрать
-    // и разослать.
-    pub fn replace(
-        &mut self,
-        position: usize,
-        len: usize,
-        bytes: &[u8],
-        sink: &mut dyn SpanSink,
-    ) -> &[SyntaxSpan] {
-        let revision = self.engine.revision + 1;
-        let spans = self.engine.replace(position, len, bytes);
+        let spans = self.engine.reparse(text);
         dispatch_spans(sink, revision, spans);
         spans
     }
@@ -393,39 +361,27 @@ mod tests {
     }
 
     #[test]
-    fn insert_dispatches_with_bumped_revision() {
+    fn reparse_dispatches_with_bumped_revision() {
         let mut sink = RecordingSink {
             batches: Vec::new(),
         };
         let mut handle = EngineHandle::parse(b"plain");
-        handle.insert(0, b"**bold))", &mut sink);
+        handle.reparse(b"**bold))", &mut sink);
         assert_eq!(sink.batches.len(), 1);
         assert_eq!(sink.batches[0].0, 1);
         assert_eq!(sink.batches[0].1[0].kind, SyntaxKind::Bold);
     }
 
     #[test]
-    fn delete_dispatches_with_bumped_revision() {
+    fn reparse_empty_dispatches_with_bumped_revision() {
         let mut sink = RecordingSink {
             batches: Vec::new(),
         };
         let mut handle = EngineHandle::parse(b"**bold))");
-        handle.delete(0, 8, &mut sink);
+        handle.reparse(b"", &mut sink);
         assert_eq!(sink.batches.len(), 1);
         assert_eq!(sink.batches[0].0, 1);
         assert!(sink.batches[0].1.is_empty());
-    }
-
-    #[test]
-    fn replace_dispatches_with_bumped_revision() {
-        let mut sink = RecordingSink {
-            batches: Vec::new(),
-        };
-        let mut handle = EngineHandle::parse(b"plain");
-        handle.replace(0, 5, b"**bold))", &mut sink);
-        assert_eq!(sink.batches.len(), 1);
-        assert_eq!(sink.batches[0].0, 1);
-        assert_eq!(sink.batches[0].1[0].kind, SyntaxKind::Bold);
     }
 
     #[test]
@@ -434,7 +390,7 @@ mod tests {
             batches: Vec::new(),
         };
         let mut handle = EngineHandle::parse(b"**a))");
-        handle.insert(5, b" b", &mut sink);
+        handle.reparse(b"**a)) b", &mut sink);
         assert_eq!(handle.revision(), 1);
         assert_eq!(sink.batches.len(), 1);
         assert_eq!(sink.batches[0].0, 1);

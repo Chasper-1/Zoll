@@ -2,7 +2,6 @@
 
 mod api;
 mod dependency;
-mod edit;
 mod line_map;
 mod parser;
 mod resolver;
