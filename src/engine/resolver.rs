@@ -29,6 +29,11 @@
 //! пробел запрещён.
 
 // Вид синтаксической конструкции.
+//
+// Каждый вид — отдельная конструкция: inline/line/block варианты одного
+// семейства разведены (например, `%`/`%%`/`%%%` — CommentInline,
+// CommentLine, CommentBlock), чтобы редактор получал их по отдельным
+// ручкам и не определял уровень сам.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxKind {
     // Inline
@@ -41,17 +46,23 @@ pub enum SyntaxKind {
     Deletion,
     Superscript,
     Subscript,
-    Formula,
+    FormulaInline,
+    CommentInline,
+    SpoilerInline,
     // Line
     Header(u32),
-    Comment,
-    Spoiler,
+    Tag,
     Quote,
     ListItem,
     TableRow,
-    Tag,
     ThematicBreak,
+    FormulaLine,
+    CommentLine,
+    SpoilerLine,
     // Block
+    FormulaBlock,
+    CommentBlock,
+    SpoilerBlock,
     Metadata,
 }
 
@@ -61,6 +72,67 @@ pub struct SyntaxSpan {
     pub start: usize,
     pub end: usize,
     pub kind: SyntaxKind,
+}
+
+impl SyntaxSpan {
+    // Контентный диапазон: спаны без маркеров.
+    //
+    // Задел на будущее: сейчас редактор работает с полными диапазонами
+    // (с маркерами), движок этот метод не вызывает. Возвращает
+    // (start, end) текста конструкции без разметки.
+    pub fn content_range(&self, text: &[u8]) -> (usize, usize) {
+        match self.kind {
+            // Inline: открытие 1 байт, закрытие `))` 2 байта.
+            SyntaxKind::Bold
+            | SyntaxKind::Italic
+            | SyntaxKind::Underline
+            | SyntaxKind::Strikethrough
+            | SyntaxKind::Highlight
+            | SyntaxKind::Insertion
+            | SyntaxKind::Deletion
+            | SyntaxKind::Superscript
+            | SyntaxKind::Subscript
+            | SyntaxKind::FormulaInline
+            | SyntaxKind::CommentInline
+            | SyntaxKind::SpoilerInline => (self.start + 1, self.end - 2),
+            // Line-close: открытие 2 байта, закрытие `}` 1 байт или до EOL.
+            SyntaxKind::FormulaLine | SyntaxKind::CommentLine | SyntaxKind::SpoilerLine => {
+                let end = if text.get(self.end.wrapping_sub(1)) == Some(&b'}') {
+                    self.end - 1
+                } else {
+                    self.end
+                };
+                (self.start + 2, end)
+            }
+            // Block: открытие 3 байта, закрытие `}` 1 байт.
+            SyntaxKind::FormulaBlock
+            | SyntaxKind::CommentBlock
+            | SyntaxKind::SpoilerBlock
+            | SyntaxKind::Metadata => (self.start + 3, self.end - 1),
+            // Line (not-close): маркер в начале строки, контент до EOL.
+            SyntaxKind::Header(_) => {
+                // `#N ` — цифры после `#`, затем пробел.
+                let mut i = self.start + 1;
+                while text.get(i).is_some_and(|&b| b.is_ascii_digit()) {
+                    i += 1;
+                }
+                (i + 1, self.end)
+            }
+            SyntaxKind::Tag => (self.start + 3, self.end),
+            SyntaxKind::Quote => (self.start + 2, self.end),
+            SyntaxKind::ListItem => {
+                // `- ` или `1. ` — по первому байту маркера.
+                let marker = if text.get(self.start) == Some(&b'-') {
+                    2
+                } else {
+                    3
+                };
+                (self.start + marker, self.end)
+            }
+            SyntaxKind::TableRow => (self.start + 1, self.end - 1),
+            SyntaxKind::ThematicBreak => (self.start, self.start),
+        }
+    }
 }
 
 // Состояние разбора: текст, текущая строка, стеки и диапазоны.
@@ -252,9 +324,9 @@ fn inline_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'-', 2) => Some(SyntaxKind::Deletion),
         (b'\'', 2) => Some(SyntaxKind::Superscript),
         (b',', 2) => Some(SyntaxKind::Subscript),
-        (b'$', 1) => Some(SyntaxKind::Formula),
-        (b'%', 1) => Some(SyntaxKind::Comment),
-        (b'!', 1) => Some(SyntaxKind::Spoiler),
+        (b'$', 1) => Some(SyntaxKind::FormulaInline),
+        (b'%', 1) => Some(SyntaxKind::CommentInline),
+        (b'!', 1) => Some(SyntaxKind::SpoilerInline),
         _ => None,
     }
 }
@@ -263,9 +335,9 @@ fn inline_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
 // строки.
 fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
-        (b'%', 2) => Some(SyntaxKind::Comment),
-        (b'$', 2) => Some(SyntaxKind::Formula),
-        (b'!', 2) => Some(SyntaxKind::Spoiler),
+        (b'%', 2) => Some(SyntaxKind::CommentLine),
+        (b'$', 2) => Some(SyntaxKind::FormulaLine),
+        (b'!', 2) => Some(SyntaxKind::SpoilerLine),
         _ => None,
     }
 }
@@ -274,9 +346,9 @@ fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
 // закрывается `}` строго в начале строки.
 fn block_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
-        (b'%', 3) => Some(SyntaxKind::Comment),
-        (b'$', 3) => Some(SyntaxKind::Formula),
-        (b'!', 3) => Some(SyntaxKind::Spoiler),
+        (b'%', 3) => Some(SyntaxKind::CommentBlock),
+        (b'$', 3) => Some(SyntaxKind::FormulaBlock),
+        (b'!', 3) => Some(SyntaxKind::SpoilerBlock),
         (b'@', 2) => Some(SyntaxKind::Metadata),
         _ => None,
     }
@@ -441,7 +513,7 @@ mod tests {
             vec![SyntaxSpan {
                 start: 0,
                 end: 15,
-                kind: SyntaxKind::Comment
+                kind: SyntaxKind::CommentLine
             }]
         );
     }
@@ -451,14 +523,18 @@ mod tests {
         // %% без } — line-close действует до конца строки
         let spans = parse_spans("%%скрыто");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Comment);
+        assert_eq!(spans[0].kind, SyntaxKind::CommentLine);
     }
 
     #[test]
     fn comment_mid_line() {
         // line-close маркер работает с любого места строки
         let spans = parse_spans("Текст %%комментарий}");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::CommentLine)
+        );
     }
 
     #[test]
@@ -472,25 +548,37 @@ mod tests {
         // пробел перед } — не закрывашка, комментарий идёт до конца строки
         let spans = parse_spans("%%скрыто }");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Comment);
+        assert_eq!(spans[0].kind, SyntaxKind::CommentLine);
     }
 
     #[test]
     fn spoiler_line() {
         let spans = parse_spans("!!спойлер: текст}");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::SpoilerLine)
+        );
     }
 
     #[test]
     fn spoiler_mid_line() {
         let spans = parse_spans("Текст !!скрытое содержимое}");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::SpoilerLine)
+        );
     }
 
     #[test]
     fn formula_line() {
         let spans = parse_spans("x = 5 $$sqrt(x)}");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Formula));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::FormulaLine)
+        );
     }
 
     #[test]
@@ -559,9 +647,9 @@ mod tests {
             ("--удаление))", SyntaxKind::Deletion),
             ("''верхний))", SyntaxKind::Superscript),
             (",,нижний))", SyntaxKind::Subscript),
-            ("$x+y))", SyntaxKind::Formula),
-            ("%комментарий))", SyntaxKind::Comment),
-            ("!скрыто))", SyntaxKind::Spoiler),
+            ("$x+y))", SyntaxKind::FormulaInline),
+            ("%комментарий))", SyntaxKind::CommentInline),
+            ("!скрыто))", SyntaxKind::SpoilerInline),
         ];
         for (text, expected) in cases {
             let spans = parse_spans(text);
@@ -574,10 +662,10 @@ mod tests {
     fn full_line_level_palette() {
         // Line-close маркеры из раздела 2 — закрываются `}`.
         let cases: &[(&str, SyntaxKind)] = &[
-            ("%%комментарий}", SyntaxKind::Comment),
-            ("$$sqrt(x)}", SyntaxKind::Formula),
-            ("!!спойлер}", SyntaxKind::Spoiler),
-            ("!!заголовок:текст}", SyntaxKind::Spoiler),
+            ("%%комментарий}", SyntaxKind::CommentLine),
+            ("$$sqrt(x)}", SyntaxKind::FormulaLine),
+            ("!!спойлер}", SyntaxKind::SpoilerLine),
+            ("!!заголовок:текст}", SyntaxKind::SpoilerLine),
         ];
         for (text, expected) in cases {
             let spans = parse_spans(text);
@@ -633,9 +721,9 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::Underline));
         assert!(kinds.contains(&SyntaxKind::Strikethrough));
         assert!(kinds.contains(&SyntaxKind::Highlight));
-        assert!(kinds.contains(&SyntaxKind::Comment));
-        assert!(kinds.contains(&SyntaxKind::Spoiler));
-        assert!(kinds.contains(&SyntaxKind::Formula));
+        assert!(kinds.contains(&SyntaxKind::CommentLine));
+        assert!(kinds.contains(&SyntaxKind::SpoilerLine));
+        assert!(kinds.contains(&SyntaxKind::FormulaLine));
     }
 
     // ─── Блочные маркеры (%%%/$$$/!!!) ─────────────────────────
@@ -645,14 +733,14 @@ mod tests {
         // %%% открывает блок, `}` в начале строки закрывает.
         let spans = parse_spans("%%%\nскрыто\n}");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Comment);
+        assert_eq!(spans[0].kind, SyntaxKind::CommentBlock);
     }
 
     #[test]
     fn block_formula_multiline() {
         let spans = parse_spans("$$$\nx^2\n}");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Formula);
+        assert_eq!(spans[0].kind, SyntaxKind::FormulaBlock);
     }
 
     #[test]
@@ -660,7 +748,7 @@ mod tests {
         // Заголовок внутри спана — редактор классифицирует диапазоном.
         let spans = parse_spans("!!!спойлер:\nскрыто\n}");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Spoiler);
+        assert_eq!(spans[0].kind, SyntaxKind::SpoilerBlock);
     }
 
     #[test]
@@ -699,7 +787,10 @@ mod tests {
         // своей `}` mid-line, блок — своей в начале строки.
         let spans = parse_spans("%%%\nтекст %%скрыто}\n}");
         let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
-        assert_eq!(kinds, vec![SyntaxKind::Comment, SyntaxKind::Comment]);
+        assert_eq!(
+            kinds,
+            vec![SyntaxKind::CommentLine, SyntaxKind::CommentBlock]
+        );
     }
 
     #[test]
@@ -707,7 +798,7 @@ mod tests {
         // Содержимое блока на нескольких строках — спан от %%% до `}`.
         let spans = parse_spans("%%%\nстрока 1\nстрока 2\n}");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].kind, SyntaxKind::Comment);
+        assert_eq!(spans[0].kind, SyntaxKind::CommentBlock);
     }
 
     // ─── Inline-комментарий % и inline-спойлер ! ────────────────
@@ -716,14 +807,22 @@ mod tests {
     fn percent_inline_comment() {
         // % — inline-комментарий: работает в любом месте строки.
         let spans = parse_spans("Текст %скрыто))");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::CommentInline)
+        );
     }
 
     #[test]
     fn exclamation_inline_spoiler() {
         // ! — inline-спойлер.
         let spans = parse_spans("Текст !скрыто))");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::SpoilerInline)
+        );
     }
 
     #[test]
@@ -742,7 +841,11 @@ mod tests {
     fn line_close_mid_line_unclosed_to_eol() {
         // %% в середине строки без } — спан до конца строки.
         let spans = parse_spans("Текст %%скрыто");
-        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == SyntaxKind::CommentLine)
+        );
     }
 
     // ─── Метаданные (@@) ─────────────────────────────────────────
@@ -778,5 +881,49 @@ mod tests {
         // Одиночный @ и тройной @@@ — не маркеры.
         assert!(parse_spans("почта user@example.com").is_empty());
         assert!(parse_spans("@@@\nтекст\n}").is_empty());
+    }
+
+    // ─── Контентные диапазоны (задел на будущее) ─────────────────
+
+    #[test]
+    fn content_range_inline() {
+        // **bold)) → контент без маркеров: [1, 6) = "bold".
+        let text = "**bold))";
+        let spans = parse_spans(text);
+        assert_eq!(spans[0].content_range(text.as_bytes()), (1, 6));
+    }
+
+    #[test]
+    fn content_range_line_close() {
+        // %%hidden} → [2, 8) = "hidden"; %%to end → [12, 18) = "to end".
+        let text = "%%hidden} %%to end";
+        let spans = parse_spans(text);
+        assert_eq!(spans[0].content_range(text.as_bytes()), (2, 8));
+        assert_eq!(spans[1].content_range(text.as_bytes()), (12, 18));
+    }
+
+    #[test]
+    fn content_range_block() {
+        // %%%\nblock\n} → [3, 10) = "\nblock\n".
+        let text = "%%%\nblock\n}";
+        let spans = parse_spans(text);
+        assert_eq!(spans[0].content_range(text.as_bytes()), (3, 10));
+    }
+
+    #[test]
+    fn content_range_line_not_close() {
+        let text = "#1 heading\n#: tag\n> quote\n- item\n1. item\n|a|b|\n---";
+        let spans = parse_spans(text);
+        // Header: после `#1 `; Tag: после `#: `; Quote: после `> `.
+        assert_eq!(spans[0].content_range(text.as_bytes()), (3, 10));
+        assert_eq!(spans[1].content_range(text.as_bytes()), (14, 17));
+        assert_eq!(spans[2].content_range(text.as_bytes()), (20, 25));
+        // ListItem: `- ` → +2, `1. ` → +3.
+        assert_eq!(spans[3].content_range(text.as_bytes()), (28, 32));
+        assert_eq!(spans[4].content_range(text.as_bytes()), (36, 40));
+        // TableRow: без внешних `|`.
+        assert_eq!(spans[5].content_range(text.as_bytes()), (42, 45));
+        // ThematicBreak: контента нет.
+        assert_eq!(spans[6].content_range(text.as_bytes()), (47, 47));
     }
 }

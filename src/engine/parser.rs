@@ -17,7 +17,7 @@
 //! Единая координатная система — абсолютная позиция в байтах.
 //! Редактор получает исходный буфер и диапазоны в byte offsets.
 
-use crate::engine::api::SpanSink;
+use crate::engine::api::{SpanSink, dispatch_spans};
 use crate::engine::dependency::DependencyGraph;
 use crate::engine::edit::Edit;
 use crate::engine::line_map::LineMap;
@@ -59,15 +59,36 @@ impl Engine {
     // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
     pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
         let engine = Self::parse(text);
-        sink.on_spans(engine.revision, &engine.spans);
+        dispatch_spans(sink, engine.revision, &engine.spans);
         engine
     }
 
-    // Применить правку и пересобрать спаны.
+    // Вставить текст в позицию и пересобрать спаны.
     //
     // Инкремент revision на каждую правку. Сейчас пересобирается весь
     // документ; оптимизация «только затронутые блоки» — следующий шаг.
-    pub fn apply_edit(&mut self, edit: &Edit) -> &[SyntaxSpan] {
+    pub fn insert(&mut self, position: usize, bytes: &[u8]) -> &[SyntaxSpan] {
+        self.apply_edit(&Edit::new(position, 0, bytes))
+    }
+
+    // Удалить кусок `[position, position + len)` и пересобрать спаны.
+    pub fn delete(&mut self, position: usize, len: usize) -> &[SyntaxSpan] {
+        self.apply_edit(&Edit::new(position, len, b""))
+    }
+
+    // Заменить кусок `[position, position + len)` на `bytes` и пересобрать
+    // спаны.
+    pub fn replace(&mut self, position: usize, len: usize, bytes: &[u8]) -> &[SyntaxSpan] {
+        self.apply_edit(&Edit::new(position, len, bytes))
+    }
+
+    // Номер строки по байтовой позиции.
+    pub fn line_at(&self, byte: usize) -> usize {
+        self.line_map.line_at(byte)
+    }
+
+    // Внутренний путь: применить правку к буферу и пересобрать спаны.
+    fn apply_edit(&mut self, edit: &Edit) -> &[SyntaxSpan] {
         edit.apply(&mut self.text);
         self.revision += 1;
 
@@ -76,21 +97,6 @@ impl Engine {
         self.spans = spans;
         self.dependencies = DependencyGraph::new(&self.spans);
         &self.spans
-    }
-
-    // Применить правку и разослать новые спаны по ручке (fire-and-forget).
-    pub fn apply_edit_into(&mut self, edit: &Edit, sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
-        // apply_edit инкрементит revision ровно на 1 — считаем заранее,
-        // чтобы не читать self.revision под активным mutable-заимствованием.
-        let revision = self.revision + 1;
-        let spans = self.apply_edit(edit);
-        sink.on_spans(revision, spans);
-        spans
-    }
-
-    // Номер строки по байтовой позиции.
-    pub fn line_at(&self, byte: usize) -> usize {
-        self.line_map.line_at(byte)
     }
 }
 
@@ -202,7 +208,7 @@ mod tests {
     #[test]
     fn edit_bumps_revision() {
         let mut engine = Engine::parse(b"hello");
-        engine.apply_edit(&Edit::new(5, 0, b" world"));
+        engine.insert(5, b" world");
         assert_eq!(engine.revision, 1);
         assert_eq!(engine.text, b"hello world");
     }
@@ -211,7 +217,7 @@ mod tests {
     fn edit_creates_new_spans() {
         let mut engine = Engine::parse(b"plain");
         assert!(engine.spans.is_empty());
-        engine.apply_edit(&Edit::new(0, 0, b"**bold))"));
+        engine.insert(0, b"**bold))");
         assert_eq!(engine.spans.len(), 1);
         assert_eq!(engine.spans[0].kind, SyntaxKind::Bold);
     }
@@ -219,7 +225,7 @@ mod tests {
     #[test]
     fn line_at_after_edit() {
         let mut engine = Engine::parse(b"a\nb");
-        engine.apply_edit(&Edit::new(2, 0, b"c\n"));
+        engine.insert(2, b"c\n");
         assert_eq!(engine.line_at(3), 1);
     }
 

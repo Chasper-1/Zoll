@@ -1,28 +1,26 @@
 //! Правка документа (разделы 14–16 спеки).
 //!
-//! Редактор сообщает изменение байтового буфера, а не клавиши:
-//! удалить `[position, position + delete_len)` и вставить `insert`.
+//! Внутреннее представление изменения байтового буфера. Публичный
+//! интерфейс для редактора — отдельные ручки вставки/удаления/замены
+//! (`EngineHandle::insert` / `delete` / `replace`), чтобы не думать,
+//! что и куда: вставить — значит вставить, удалить — значит удалить.
 
-// Изменение документа.
+// Изменение документа: удалить `[position, position + delete_len)`
+// и вставить `insert`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Edit {
+pub(crate) struct Edit {
     pub position: usize,
     pub delete_len: usize,
     pub insert: Vec<u8>,
 }
 
 impl Edit {
-    pub fn new(position: usize, delete_len: usize, insert: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn new(position: usize, delete_len: usize, insert: impl Into<Vec<u8>>) -> Self {
         Edit {
             position,
             delete_len,
             insert: insert.into(),
         }
-    }
-
-    // Изменение длины документа: `insert.len() - delete_len`.
-    pub fn delta(&self) -> isize {
-        self.insert.len() as isize - self.delete_len as isize
     }
 
     // Применить правку к буферу.
@@ -58,11 +56,5 @@ mod tests {
         let mut text = b"abc".to_vec();
         Edit::new(1, 1, b"XYZ").apply(&mut text);
         assert_eq!(text, b"aXYZc");
-    }
-
-    #[test]
-    fn delta_calc() {
-        let edit = Edit::new(0, 3, b"12345");
-        assert_eq!(edit.delta(), 2);
     }
 }

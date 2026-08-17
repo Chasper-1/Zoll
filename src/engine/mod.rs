@@ -10,7 +10,6 @@ mod simd;
 
 pub use api::*;
 pub use dependency::DependencyGraph;
-pub use edit::Edit;
 pub use line_map::LineMap;
 pub use parser::*;
 pub use resolver::{SyntaxKind, SyntaxSpan};
