@@ -45,6 +45,7 @@ pub trait SpanSink {
     fn on_formula_inline(&mut self, start: usize, end: usize);
     fn on_comment_inline(&mut self, start: usize, end: usize);
     fn on_spoiler_inline(&mut self, start: usize, end: usize);
+    fn on_code_inline(&mut self, start: usize, end: usize);
     // ─── Line ───
     fn on_header(&mut self, start: usize, end: usize, level: u32);
     fn on_tag(&mut self, start: usize, end: usize);
@@ -84,6 +85,7 @@ pub(crate) fn dispatch_spans(sink: &mut dyn SpanSink, revision: u64, spans: &[Sy
             SyntaxKind::FormulaInline => sink.on_formula_inline(span.start, span.end),
             SyntaxKind::CommentInline => sink.on_comment_inline(span.start, span.end),
             SyntaxKind::SpoilerInline => sink.on_spoiler_inline(span.start, span.end),
+            SyntaxKind::CodeInline => sink.on_code_inline(span.start, span.end),
             SyntaxKind::Header(level) => sink.on_header(span.start, span.end, level),
             SyntaxKind::Tag => sink.on_tag(span.start, span.end),
             SyntaxKind::Quote => sink.on_quote(span.start, span.end),
@@ -253,6 +255,13 @@ mod tests {
                 kind: SyntaxKind::SpoilerInline,
             });
         }
+        fn on_code_inline(&mut self, start: usize, end: usize) {
+            self.batches.last_mut().unwrap().1.push(SyntaxSpan {
+                start,
+                end,
+                kind: SyntaxKind::CodeInline,
+            });
+        }
         fn on_header(&mut self, start: usize, end: usize, level: u32) {
             self.batches.last_mut().unwrap().1.push(SyntaxSpan {
                 start,
@@ -405,7 +414,7 @@ mod tests {
             batches: Vec::new(),
         };
         Engine::parse_into(
-            "#1 Заголовок\n%скрыто)) %%скрыто}\n%%%\nблок\n}\n".as_bytes(),
+            "#1 Заголовок\n%скрыто)) %%скрыто}\n%%%\nблок\n}\n`код))".as_bytes(),
             &mut sink,
         );
         let kinds: Vec<SyntaxKind> = sink.batches[0].1.iter().map(|span| span.kind).collect();
@@ -416,6 +425,7 @@ mod tests {
                 SyntaxKind::CommentInline,
                 SyntaxKind::CommentLine,
                 SyntaxKind::CommentBlock,
+                SyntaxKind::CodeInline,
             ]
         );
     }

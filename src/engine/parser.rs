@@ -24,7 +24,7 @@ use crate::engine::resolver::{ResolveState, SyntaxSpan, process_marker};
 use crate::engine::simd::scan;
 
 // Набор интересующих байтов: синтаксические + структурный `\n`.
-pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@\n";
+pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@`\n";
 
 // Движок парсера.
 //

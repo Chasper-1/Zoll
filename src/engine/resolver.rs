@@ -50,6 +50,7 @@ pub enum SyntaxKind {
     FormulaInline,
     CommentInline,
     SpoilerInline,
+    CodeInline,
     // Line
     Header(u32),
     Tag,
@@ -279,6 +280,7 @@ fn inline_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'$', 1) => Some(SyntaxKind::FormulaInline),
         (b'%', 1) => Some(SyntaxKind::CommentInline),
         (b'!', 1) => Some(SyntaxKind::SpoilerInline),
+        (b'`', 1) => Some(SyntaxKind::CodeInline),
         _ => None,
     }
 }
@@ -430,6 +432,44 @@ mod tests {
     #[test]
     fn space_after_open_not_an_open() {
         assert!(parse_spans("** жирный))").is_empty());
+    }
+
+    #[test]
+    fn code_inline_closed() {
+        // `code)) = 1 + 4 (code) + 2 = 7 байт
+        let spans = parse_spans("`code))");
+        assert_eq!(
+            spans,
+            vec![SyntaxSpan {
+                start: 0,
+                end: 7,
+                kind: SyntaxKind::CodeInline
+            }]
+        );
+    }
+
+    #[test]
+    fn code_inline_mid_line() {
+        // a `code)) = 2 + 1 + 4 + 2 = 9 байт
+        let spans = parse_spans("a `code))");
+        assert_eq!(
+            spans,
+            vec![SyntaxSpan {
+                start: 2,
+                end: 9,
+                kind: SyntaxKind::CodeInline
+            }]
+        );
+    }
+
+    #[test]
+    fn code_inline_unclosed_discarded() {
+        assert!(parse_spans("`code").is_empty());
+    }
+
+    #[test]
+    fn code_inline_space_after_open_invalid() {
+        assert!(parse_spans("` code))").is_empty());
     }
 
     #[test]
@@ -689,6 +729,7 @@ mod tests {
             ("$x+y))", SyntaxKind::FormulaInline),
             ("%комментарий))", SyntaxKind::CommentInline),
             ("!скрыто))", SyntaxKind::SpoilerInline),
+            ("`код))", SyntaxKind::CodeInline),
         ];
         for (text, expected) in cases {
             let spans = parse_spans(text);
