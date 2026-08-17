@@ -103,13 +103,13 @@ pub(crate) fn dispatch_spans(sink: &mut dyn SpanSink, revision: u64, spans: &[Sy
 }
 
 // Ручка на движок — единственный объект, который держит редактор.
-pub struct EngineHandle {
-    engine: Engine,
+pub struct EngineHandle<'a> {
+    engine: Engine<'a>,
 }
 
-impl EngineHandle {
+impl<'a> EngineHandle<'a> {
     // Разобрать документ с нуля (revision = 0).
-    pub fn parse(text: &[u8]) -> Self {
+    pub fn parse(text: &'a [u8]) -> Self {
         EngineHandle {
             engine: Engine::parse(text),
         }
