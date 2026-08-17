@@ -11,25 +11,22 @@
 //!
 //! Никакого сканирования текста: всё, что нужно, уже найдено SIMD.
 //!
-//! ## Inline-маркеры
+//! ## Уровни маркеров (docs/syntax.md, раздел 9)
 //!
-//! Стек открытых маркеров. Каждый открытый маркер применяет своё свойство
-//! от своей позиции до закрывашки. `))` закрывает **все** открытые inline
-//! маркеры разом — свойства наслаиваются на один и тот же текст:
+//! Тип маркера определяется самим маркером (символом и их количеством),
+//! а не позицией в строке:
 //!
-//! ```text
-//! **//текст))
-//! └─bold────┘   bold от `**` до закрывашки
-//!   └─italic┘   italic от `//` до закрывашки
-//! ```
+//! - **Inline** (`**`, `//`, `%`, `$`, `!`, ...) — в любом месте строки,
+//!   закрываются `))`. Стек открытых маркеров; `))` закрывает все разом.
+//! - **Line (close)** (`%%`, `$$`, `!!`) — в любом месте строки, закрываются
+//!   `}` или автоматически до конца строки.
+//! - **Line (not-close)** (`#1`, `#:`, `>`, `-`, `1.`, `---`, `|`) — только
+//!   в начале строки, диапазон сразу до конца строки.
+//! - **Block** (`%%%`, `$$$`, `!!!`, `@@`) — только в начале строки,
+//!   переживают строки, закрываются `}` в начале строки.
 //!
-//! `))` без открытых маркеров выбрасывается. На `\n` незакрытые inline
-//! маркеры сбрасываются (inline не выходит за пределы строки).
-//!
-//! ## Line-маркеры
-//!
-//! Проверяются только в начале строки (контекст строки). Закрытие —
-//! явным `}` или автоматически на `\n`.
+//! Правила пробелов: после открывающего маркера и перед закрывающим
+//! пробел запрещён.
 
 // Вид синтаксической конструкции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +51,8 @@ pub enum SyntaxKind {
     TableRow,
     Tag,
     ThematicBreak,
+    // Block
+    Metadata,
 }
 
 // Синтаксический диапазон в байтовых координатах.
@@ -64,16 +63,19 @@ pub struct SyntaxSpan {
     pub kind: SyntaxKind,
 }
 
-// Состояние разбора: текст, текущая строка, стеки и спаны.
+// Состояние разбора: текст, текущая строка, стеки и диапазоны.
 pub(crate) struct ResolveState<'a> {
     pub text: &'a [u8],
     // Границы текущей строки — известны из карты строк (этап 1).
     pub line_start: usize,
     pub line_end: usize,
     pub spans: Vec<SyntaxSpan>,
+    // Открытые inline-маркеры (**, //, %, $, !, ...): не выходят за строку.
     pub inline_stack: Vec<(SyntaxKind, usize)>,
-    pub line_stack: Vec<(SyntaxKind, usize)>,
-    // Блочные конструкции (%%%/$$$/!!!): переживают строки, закрываются
+    // Открытые line-close маркеры (%%/$$/!!): закрываются `}` или до конца
+    // строки.
+    pub line_close_stack: Vec<(SyntaxKind, usize)>,
+    // Блочные конструкции (%%%/$$$/!!!/@@): переживают строки, закрываются
     // `}` строго в начале строки.
     pub block_stack: Vec<(SyntaxKind, usize)>,
 }
@@ -86,7 +88,7 @@ impl<'a> ResolveState<'a> {
             line_end: text.len(),
             spans: Vec::new(),
             inline_stack: Vec::new(),
-            line_stack: Vec::new(),
+            line_close_stack: Vec::new(),
             block_stack: Vec::new(),
         }
     }
@@ -102,35 +104,35 @@ impl<'a> ResolveState<'a> {
 pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
     let end = start + len;
     match byte {
-        b')' if len >= 2 => close_inline(state, start, end),
+        b')' if len >= 2 => close_inline_markers(state, start, end),
         b'}' => close_brace(state, start, end),
-        b'.' => numbered_list(state, start, end),
+        b'.' => try_numbered_list(state, start),
         _ => open_marker(state, byte, len, start, end),
     }
 }
 
 // `}` — одна скобка для двух уровней, различие по позиции:
-// - в начале строки → закрытие блока (%%%/$$$/!!!)
-// - mid-line → закрытие line-level (%%/$$/!!)
+// - в начале строки → закрытие блока (%%%/$$$/!!!/@@)
+// - mid-line → закрытие line-close (%%/$$/!!)
 #[inline]
 fn close_brace(state: &mut ResolveState<'_>, start: usize, end: usize) {
     if start == state.line_start {
         // Блок: закрывается строго в начале строки, без правила пробелов.
-        if let Some((kind, open_start)) = state.block_stack.pop() {
+        if let Some((kind, open_position)) = state.block_stack.pop() {
             state.spans.push(SyntaxSpan {
-                start: open_start,
+                start: open_position,
                 end,
                 kind,
             });
         }
     } else {
-        close_line(state, start, end);
+        close_line_marker(state, start, end);
     }
 }
 
 // Универсальная inline-закрывашка `))`: закрывает все открытые inline.
 #[inline]
-fn close_inline(state: &mut ResolveState<'_>, start: usize, end: usize) {
+fn close_inline_markers(state: &mut ResolveState<'_>, start: usize, end: usize) {
     let text = state.text;
     // Нет открытого состояния — не закрывашка.
     if state.inline_stack.is_empty() {
@@ -140,29 +142,29 @@ fn close_inline(state: &mut ResolveState<'_>, start: usize, end: usize) {
     if start > 0 && text[start - 1] == b' ' {
         return;
     }
-    while let Some((kind, open_start)) = state.inline_stack.pop() {
+    while let Some((kind, open_position)) = state.inline_stack.pop() {
         state.spans.push(SyntaxSpan {
-            start: open_start,
+            start: open_position,
             end,
             kind,
         });
     }
 }
 
-// Контекстная line-level закрывашка `}`: только при открытом состоянии.
+// Контекстная line-close закрывашка `}`: только при открытом состоянии.
 #[inline]
-fn close_line(state: &mut ResolveState<'_>, start: usize, end: usize) {
+fn close_line_marker(state: &mut ResolveState<'_>, start: usize, end: usize) {
     let text = state.text;
-    if state.line_stack.is_empty() {
+    if state.line_close_stack.is_empty() {
         return;
     }
     // Правило пробелов: перед `}` не должно быть пробела.
     if start > 0 && text[start - 1] == b' ' {
         return;
     }
-    if let Some((kind, open_start)) = state.line_stack.pop() {
+    if let Some((kind, open_position)) = state.line_close_stack.pop() {
         state.spans.push(SyntaxSpan {
-            start: open_start,
+            start: open_position,
             end,
             kind,
         });
@@ -171,7 +173,7 @@ fn close_line(state: &mut ResolveState<'_>, start: usize, end: usize) {
 
 // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
 #[inline]
-fn numbered_list(state: &mut ResolveState<'_>, start: usize, end: usize) {
+fn try_numbered_list(state: &mut ResolveState<'_>, start: usize) {
     let text = state.text;
     let mut numbered = start > state.line_start;
     if numbered {
@@ -191,29 +193,29 @@ fn numbered_list(state: &mut ResolveState<'_>, start: usize, end: usize) {
     }
 }
 
-// Открытие маркера: блок, line-level, line-маркер или inline.
+// Открытие маркера: блок, line-close, line (not-close) или inline.
 #[inline]
 fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize, end: usize) {
     let text = state.text;
-    // Блок (%%%/$$$/!!!) — строго в начале строки, len >= 3.
-    if start == state.line_start && len >= 3 {
-        if let Some(kind) = block_level_open(byte, len) {
+    // Блок (%%%/$$$/!!!/@@) — строго в начале строки.
+    if start == state.line_start {
+        if let Some(kind) = block_marker_kind(byte, len) {
             state.block_stack.push((kind, start));
             return;
         }
     }
-    // Line-level открытие — с любого места строки.
-    if let Some(kind) = line_level_open(byte, len) {
+    // Line-close открытие (%%/$$/!!) — с любого места строки.
+    if let Some(kind) = line_close_marker_kind(byte, len) {
         // Правило пробелов: после маркера не должно быть пробела.
         if end < text.len() && text[end] == b' ' {
             return;
         }
-        state.line_stack.push((kind, start));
+        state.line_close_stack.push((kind, start));
         return;
     }
-    // Line-маркеры — только в начале строки.
-    if start == state.line_start && is_line_marker_byte(byte) {
-        if let Some(kind) = try_line_marker(text, byte, start, len, state.line_end) {
+    // Line (not-close) маркеры — только в начале строки.
+    if start == state.line_start && is_line_not_close_byte(byte) {
+        if let Some(kind) = try_line_not_close(text, byte, start, len, state.line_end) {
             state.spans.push(SyntaxSpan {
                 start,
                 end: state.line_end,
@@ -223,7 +225,7 @@ fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize,
         }
     }
     // Inline-открытие.
-    if let Some(kind) = inline_open(byte, len) {
+    if let Some(kind) = inline_marker_kind(byte, len) {
         // Правило пробелов: после открывашки не должно быть пробела.
         if end < text.len() && text[end] == b' ' {
             return;
@@ -232,13 +234,14 @@ fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize,
     }
 }
 
-// Может ли байт быть line-маркером (заголовок/тег/цитата/список/таблица).
-fn is_line_marker_byte(byte: u8) -> bool {
+// Может ли байт начинать line (not-close) маркер
+// (заголовок/тег/цитата/список/таблица).
+fn is_line_not_close_byte(byte: u8) -> bool {
     matches!(byte, b'#' | b'>' | b'|' | b'*' | b'-' | b'+')
 }
 
 // Свойство inline-маркера по байту и длине последовательности.
-fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
+fn inline_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
         (b'*', 2) => Some(SyntaxKind::Bold),
         (b'/', 2) => Some(SyntaxKind::Italic),
@@ -250,12 +253,15 @@ fn inline_open(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'\'', 2) => Some(SyntaxKind::Superscript),
         (b',', 2) => Some(SyntaxKind::Subscript),
         (b'$', 1) => Some(SyntaxKind::Formula),
+        (b'%', 1) => Some(SyntaxKind::Comment),
+        (b'!', 1) => Some(SyntaxKind::Spoiler),
         _ => None,
     }
 }
 
-// Свойство line-level маркера (%%/$$/!!) — закрывается `}`.
-fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
+// Свойство line-close маркера (%%/$$/!!) — закрывается `}` или до конца
+// строки.
+fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
         (b'%', 2) => Some(SyntaxKind::Comment),
         (b'$', 2) => Some(SyntaxKind::Formula),
@@ -264,20 +270,21 @@ fn line_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
     }
 }
 
-// Свойство блочного маркера (%%%/$$$/!!!) — многострочный, закрывается
-// `}` строго в начале строки.
-fn block_level_open(byte: u8, len: usize) -> Option<SyntaxKind> {
+// Свойство блочного маркера (%%%/$$$/!!! и @@) — многострочный,
+// закрывается `}` строго в начале строки.
+fn block_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
     match (byte, len) {
         (b'%', 3) => Some(SyntaxKind::Comment),
         (b'$', 3) => Some(SyntaxKind::Formula),
         (b'!', 3) => Some(SyntaxKind::Spoiler),
+        (b'@', 2) => Some(SyntaxKind::Metadata),
         _ => None,
     }
 }
 
-// Line-маркер в начале строки. Конец строки `line_end` уже готов из карты
-// строк — сканировать текст не нужно.
-fn try_line_marker(
+// Line (not-close) маркер в начале строки. Конец строки `line_end` уже
+// готов из карты строк — сканировать текст не нужно.
+fn try_line_not_close(
     text: &[u8],
     byte: u8,
     start: usize,
@@ -440,14 +447,16 @@ mod tests {
     }
 
     #[test]
-    fn comment_unclosed_discarded() {
-        // %% без } — незавершённая конструкция, выбрасывается
-        assert!(parse_spans("%%скрыто").is_empty());
+    fn comment_unclosed_to_end_of_line() {
+        // %% без } — line-close действует до конца строки
+        let spans = parse_spans("%%скрыто");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Comment);
     }
 
     #[test]
     fn comment_mid_line() {
-        // line-level маркер работает с любого места строки
+        // line-close маркер работает с любого места строки
         let spans = parse_spans("Текст %%комментарий}");
         assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
     }
@@ -459,9 +468,11 @@ mod tests {
     }
 
     #[test]
-    fn comment_space_before_close_invalid() {
-        // пробел перед } — не закрывашка
-        assert!(parse_spans("%%скрыто }").is_empty());
+    fn comment_space_before_close_goes_to_eol() {
+        // пробел перед } — не закрывашка, комментарий идёт до конца строки
+        let spans = parse_spans("%%скрыто }");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Comment);
     }
 
     #[test]
@@ -484,7 +495,7 @@ mod tests {
 
     #[test]
     fn brace_without_open_discarded() {
-        // } без открытого line-level состояния — не закрывашка
+        // } без открытого line-close состояния — не закрывашка
         assert!(parse_spans("просто } текст").is_empty());
     }
 
@@ -549,6 +560,8 @@ mod tests {
             ("''верхний))", SyntaxKind::Superscript),
             (",,нижний))", SyntaxKind::Subscript),
             ("$x+y))", SyntaxKind::Formula),
+            ("%комментарий))", SyntaxKind::Comment),
+            ("!скрыто))", SyntaxKind::Spoiler),
         ];
         for (text, expected) in cases {
             let spans = parse_spans(text);
@@ -559,7 +572,7 @@ mod tests {
 
     #[test]
     fn full_line_level_palette() {
-        // Line-level маркеры из раздела 2 — закрываются `}`.
+        // Line-close маркеры из раздела 2 — закрываются `}`.
         let cases: &[(&str, SyntaxKind)] = &[
             ("%%комментарий}", SyntaxKind::Comment),
             ("$$sqrt(x)}", SyntaxKind::Formula),
@@ -682,7 +695,7 @@ mod tests {
 
     #[test]
     fn block_and_line_level_coexist() {
-        // Блок открыт, внутри строки line-level комментарий закрывается
+        // Блок открыт, внутри строки line-close комментарий закрывается
         // своей `}` mid-line, блок — своей в начале строки.
         let spans = parse_spans("%%%\nтекст %%скрыто}\n}");
         let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
@@ -695,5 +708,75 @@ mod tests {
         let spans = parse_spans("%%%\nстрока 1\nстрока 2\n}");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].kind, SyntaxKind::Comment);
+    }
+
+    // ─── Inline-комментарий % и inline-спойлер ! ────────────────
+
+    #[test]
+    fn percent_inline_comment() {
+        // % — inline-комментарий: работает в любом месте строки.
+        let spans = parse_spans("Текст %скрыто))");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+    }
+
+    #[test]
+    fn exclamation_inline_spoiler() {
+        // ! — inline-спойлер.
+        let spans = parse_spans("Текст !скрыто))");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Spoiler));
+    }
+
+    #[test]
+    fn stray_percent_harmless() {
+        // Одиночный % без закрытия — не конструкция.
+        assert!(parse_spans("50% текст").is_empty());
+    }
+
+    #[test]
+    fn stray_exclamation_harmless() {
+        // Одиночный ! без закрытия — не конструкция.
+        assert!(parse_spans("Привет!").is_empty());
+    }
+
+    #[test]
+    fn line_close_mid_line_unclosed_to_eol() {
+        // %% в середине строки без } — спан до конца строки.
+        let spans = parse_spans("Текст %%скрыто");
+        assert!(spans.iter().any(|span| span.kind == SyntaxKind::Comment));
+    }
+
+    // ─── Метаданные (@@) ─────────────────────────────────────────
+
+    #[test]
+    fn metadata_block() {
+        // @@ открывает блок метаданных, `}` в начале строки закрывает.
+        let spans = parse_spans("@@\ntitle: Документ\n}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].kind, SyntaxKind::Metadata);
+    }
+
+    #[test]
+    fn metadata_unclosed_discarded() {
+        // @@ без закрывающего `}` — выбрасывается.
+        assert!(parse_spans("@@\ntitle: Документ").is_empty());
+    }
+
+    #[test]
+    fn metadata_indented_ignored() {
+        // Отступы запрещены: @@ не первый символ строки — не блок.
+        assert!(parse_spans(" @@\ntitle: Документ\n}").is_empty());
+    }
+
+    #[test]
+    fn metadata_mid_line_ignored() {
+        // @@ не в начале строки — не блок.
+        assert!(parse_spans("текст @@\ntitle: Документ\n}").is_empty());
+    }
+
+    #[test]
+    fn single_at_not_marker() {
+        // Одиночный @ и тройной @@@ — не маркеры.
+        assert!(parse_spans("почта user@example.com").is_empty());
+        assert!(parse_spans("@@@\nтекст\n}").is_empty());
     }
 }

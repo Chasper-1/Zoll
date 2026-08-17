@@ -25,7 +25,7 @@ use crate::engine::resolver::{ResolveState, SyntaxSpan, process_marker};
 use crate::engine::simd::scan;
 
 // Набор интересующих байтов: синтаксические + структурный `\n`.
-pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}\n";
+pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@\n";
 
 // Движок парсера.
 #[derive(Debug, Clone)]
@@ -119,12 +119,12 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // ─── Этап 2: грамматика на готовых строках ───
     let mut state = ResolveState::new(text);
     state.line_end = newline_positions.first().copied().unwrap_or(text.len());
-    let mut line_idx = 0usize;
+    let mut line_index = 0usize;
 
     // Текущий маркер: run подряд идущих одинаковых байтов.
-    let mut run_byte: u8 = 0;
-    let mut run_start: usize = 0;
-    let mut run_len: usize = 0;
+    let mut marker_byte: u8 = 0;
+    let mut marker_start: usize = 0;
+    let mut marker_len: usize = 0;
 
     scan(text, INTERESTING_BYTES, |offset, mask| {
         let mut remaining = mask;
@@ -135,37 +135,52 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
             remaining &= remaining - 1;
 
             // Продолжение текущего маркера.
-            if byte == run_byte && pos == run_start + run_len {
-                run_len += 1;
+            if byte == marker_byte && pos == marker_start + marker_len {
+                marker_len += 1;
                 continue;
             }
             // Завершаем предыдущий маркер и разбираем его.
-            if run_len > 0 {
-                process_marker(&mut state, run_byte, run_start, run_len);
-                run_len = 0;
+            if marker_len > 0 {
+                process_marker(&mut state, marker_byte, marker_start, marker_len);
+                marker_len = 0;
             }
             if byte == b'\n' {
                 // Строка кончилась — берём следующую из готовой карты.
-                line_idx += 1;
+                line_index += 1;
                 state.line_start = pos + 1;
                 state.line_end = newline_positions
-                    .get(line_idx)
+                    .get(line_index)
                     .copied()
                     .unwrap_or(text.len());
-                // Inline и line-level не выходят за строку — сбрасываем.
-                // Блоки (block_stack) переживают строки.
+                // Незакрытые line-close (%%/$$/!!) действуют до конца
+                // строки: диапазон от маркера до `\n`.
+                for (kind, open_position) in state.line_close_stack.drain(..) {
+                    state.spans.push(SyntaxSpan {
+                        start: open_position,
+                        end: pos,
+                        kind,
+                    });
+                }
+                // Inline не выходит за строку — сбрасываем.
                 state.inline_stack.clear();
-                state.line_stack.clear();
             } else {
-                run_byte = byte;
-                run_start = pos;
-                run_len = 1;
+                marker_byte = byte;
+                marker_start = pos;
+                marker_len = 1;
             }
         }
     });
     // Последний маркер документа.
-    if run_len > 0 {
-        process_marker(&mut state, run_byte, run_start, run_len);
+    if marker_len > 0 {
+        process_marker(&mut state, marker_byte, marker_start, marker_len);
+    }
+    // Конец документа: незакрытые line-close действуют до конца текста.
+    for (kind, open_position) in state.line_close_stack.drain(..) {
+        state.spans.push(SyntaxSpan {
+            start: open_position,
+            end: text.len(),
+            kind,
+        });
     }
 
     (newline_positions, state.spans)
