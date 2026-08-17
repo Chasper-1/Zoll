@@ -1,6 +1,6 @@
 [package]
 name = "zoll"
-version = "0.3.2"
+version = "0.3.8"
 edition = "2024"
 description = "Zoll markup language — lazy, line-level parser"
 
