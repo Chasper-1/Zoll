@@ -25,7 +25,7 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::time::{Duration, Instant};
 
-use zoll::engine::{Engine, INTERESTING_BYTES, SpanSink, scan};
+use zoll::engine::{Engine, INTERESTING_BYTES, SpanSink, dispatch_spans, scan};
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -41,16 +41,13 @@ fn generate_zoll_doc(lines: usize) -> String {
         let section = i % 12;
         match section {
             0 => s.push_str(&format!("#2 Section {}\n", i / 10)),
-            1 => s.push_str(&format!(
-                "This is **bold {})) and //italic {})) text\n",
-                i, i
-            )),
+            1 => s.push_str(&format!("This is **bold {})) and //italic {})) text\n",i, i)),
             2 => s.push_str(&format!("- list item {} with **bold))\n", i)),
             3 => s.push_str(&format!("1. numbered item {} with //italic))\n", i)),
             4 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
             5 => s.push_str(&format!("Plain text {} ~~strike)) __underline))\n", i)),
             6 => s.push_str(&format!("++insert)) --delete)) ''super)) ,,sub)) {}\n", i)),
-            7 => s.push_str(&format!("%%comment {}}}\n", i)),
+            7 => s.push_str(&format!("%%this is a comment line {}}}\n", i)),
             8 => s.push_str(&format!("!!spoiler hidden {}}}\n", i)),
             9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
             10 => s.push_str(&format!("$$sqrt({})}}\n", i)),
@@ -75,14 +72,11 @@ fn generate_md_doc(lines: usize) -> String {
             3 => s.push_str(&format!("1. numbered item {} with *italic*\n", i)),
             4 => s.push_str(&format!("> quote line {} with ==highlight==\n", i)),
             5 => s.push_str(&format!("Plain text {} ~~strike~~ <u>underline</u>\n", i)),
-            6 => s.push_str(&format!(
-                "<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub> {}\n",
-                i
-            )),
+            6 => s.push_str(&format!("<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub> {}\n",i)),
             7 => s.push_str("<!-- this is a comment line -->\n"),
             8 => s.push_str(&format!("||spoiler hidden content at line {}||\n", i)),
             9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            10 => s.push_str(&format!("$$ x = {} + y $$\n", i)),
+            10 => s.push_str(&format!("$$ sqrt({}) $$\n", i)),
             11 => s.push_str(&format!("plain text line {}\n", i)),
             _ => unreachable!(),
         }
@@ -208,10 +202,14 @@ fn bench_parse_spans(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_spans");
 
     group.throughput(Throughput::Bytes(zoll_doc.len() as u64));
+    // Батч: парсинг целиком, потом рассылка всех спанов разом — доставка
+    // включена, как и у стрима (иначе сравнение нечестное).
     group.bench_function("zoll_engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
-            black_box(engine.spans());
+            let mut sink = BenchSink::new();
+            dispatch_spans(&mut sink, engine.revision, engine.spans());
+            black_box(sink.count);
         });
     });
 
@@ -360,10 +358,14 @@ fn bench_full_markup(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_markup");
 
     group.throughput(Throughput::Bytes(zoll_doc.len() as u64));
+    // Батч: парсинг целиком, потом рассылка всех спанов разом — доставка
+    // включена, как и у стрима (иначе сравнение нечестное).
     group.bench_function("zoll_engine_parse", |b| {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
-            black_box(engine.spans());
+            let mut sink = BenchSink::new();
+            dispatch_spans(&mut sink, engine.revision, engine.spans());
+            black_box(sink.count);
         });
     });
 

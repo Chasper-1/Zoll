@@ -70,6 +70,7 @@ pub trait SpanSink {
 // Отдаёт один спан по ручке: match по своему enum (джамп-таблица),
 // редактор получает уже типизированный вызов. Общий код для стрима
 // (спаны уходят по мере создания) и батча (все разом после парсинга).
+#[inline]
 pub(crate) fn dispatch_span(sink: &mut dyn SpanSink, span: SyntaxSpan) {
     match span.kind {
         SyntaxKind::Bold => sink.on_bold(span.start, span.end),
