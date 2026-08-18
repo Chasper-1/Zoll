@@ -17,7 +17,7 @@
 //! Единая координатная система — абсолютная позиция в байтах.
 //! Буфером владеет редактор; движок получает диапазоны в byte offsets.
 
-use crate::engine::api::{SpanSink, dispatch_spans};
+use crate::engine::api::SpanSink;
 use crate::engine::dependency::DependencyGraph;
 use crate::engine::line_map::LineMap;
 use crate::engine::resolver::{ResolveState, SyntaxSpan, process_marker};
@@ -54,10 +54,16 @@ impl Engine {
     }
 
     // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
+    // Спаны уходят по мере готовности: каждый — в момент создания.
     pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
-        let engine = Self::parse(text);
-        dispatch_spans(sink, engine.revision, engine.spans());
-        engine
+        sink.begin_revision(0);
+        let (newline_positions, spans) = parse_document_into(text, Some(sink));
+        sink.end_revision();
+        Engine {
+            revision: 0,
+            line_map: LineMap::new(newline_positions),
+            dependencies: DependencyGraph::new(spans),
+        }
     }
 
     // Пересобрать спаны из нового буфера редактора.
@@ -69,6 +75,17 @@ impl Engine {
     pub fn reparse(&mut self, text: &[u8]) -> &[SyntaxSpan] {
         self.revision += 1;
         let (newline_positions, spans) = parse_document(text);
+        self.line_map = LineMap::new(newline_positions);
+        self.dependencies = DependencyGraph::new(spans);
+        self.dependencies.spans()
+    }
+
+    // Пересобрать и сразу разослать спаны по ручке (стрим, fire-and-forget).
+    pub fn reparse_into(&mut self, text: &[u8], sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
+        self.revision += 1;
+        sink.begin_revision(self.revision);
+        let (newline_positions, spans) = parse_document_into(text, Some(sink));
+        sink.end_revision();
         self.line_map = LineMap::new(newline_positions);
         self.dependencies = DependencyGraph::new(spans);
         self.dependencies.spans()
@@ -96,6 +113,15 @@ impl Engine {
 //
 // Возвращает `(позиции \n, синтаксические диапазоны)`.
 pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
+    parse_document_into(text, None)
+}
+
+// То же, но с синком: каждый спан отдаётся сразу в момент создания.
+// begin_revision/end_revision — обязанность вызывающего (нужен номер версии).
+pub(crate) fn parse_document_into(
+    text: &[u8],
+    sink: Option<&mut dyn SpanSink>,
+) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // ─── Этап 1: регистры SIMD → готовые строки ───
     let mut newline_positions: Vec<usize> = Vec::new();
     scan(text, b"\n", |offset, mask| {
@@ -109,6 +135,7 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
 
     // ─── Этап 2: грамматика на готовых строках ───
     let mut state = ResolveState::new(text);
+    state.sink = sink;
     state.line_end = newline_positions.first().copied().unwrap_or(text.len());
     let mut line_index = 0usize;
 
@@ -136,7 +163,16 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
                 marker_len = 0;
             }
             if byte == b'\n' {
-                // Строка кончилась — берём следующую из готовой карты.
+                // Строка кончилась: line-close без `}` — спан до конца
+                // строки (позиция `\n`), рождается здесь, уже финальный.
+                if let Some((kind, open_position)) = state.pending_line_close.take() {
+                    state.emit(SyntaxSpan {
+                        start: open_position,
+                        end: pos,
+                        kind,
+                    });
+                }
+                // Следующая строка — из готовой карты.
                 line_index += 1;
                 state.line_start = pos + 1;
                 state.line_end = newline_positions
@@ -155,6 +191,14 @@ pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // Последний маркер документа.
     if marker_len > 0 {
         process_marker(&mut state, marker_byte, marker_start, marker_len);
+    }
+    // Последняя строка: line-close без `}` — спан до конца документа.
+    if let Some((kind, open_position)) = state.pending_line_close.take() {
+        state.emit(SyntaxSpan {
+            start: open_position,
+            end: state.line_end,
+            kind,
+        });
     }
     (newline_positions, state.spans)
 }

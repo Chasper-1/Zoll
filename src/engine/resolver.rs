@@ -18,16 +18,22 @@
 //!
 //! - **Inline** (`**`, `//`, `%`, `$`, `!`, ...) — в любом месте строки,
 //!   закрываются `))`. Стек открытых маркеров; `))` закрывает все разом.
-//! - **Line (close)** (`%%`, `$$`, `!!`, `>`) — в любом месте строки (цитата
-//!   `>` — только в начале), закрываются `}` или автоматически до конца
-//!   строки.
-//! - **Line (not-close)** (`#1`, `#:`, `>`, `-`, `1.`, `---`, `|`) — только
+//! - **Line (close)** (`%%`, `$$`, `!!`, `>`) — только в начале строки,
+//!   закрываются `}` (приоритетнее) или автоматически до конца строки.
+//! - **Line (not-close)** (`#1`, `#:`, `-`, `1.`, `---`, `|`) — только
 //!   в начале строки, диапазон сразу до конца строки.
 //! - **Block** (`%%%`, `$$$`, `!!!`, `@@`) — только в начале строки,
 //!   переживают строки, закрываются `}` в начале строки.
 //!
 //! Правила пробелов: после открывающего маркера (кроме цитаты `>`) и перед
 //! закрывающим пробел запрещён.
+//!
+//! Спаны создаются только в финальном виде: line-close держится в одном
+//! слоте на строку и рождается в момент `}` или в конце строки. Благодаря
+//! этому каждый спан можно сразу отдавать синку (стрим) — править его
+//! потом не нужно.
+
+use crate::engine::api::{SpanSink, dispatch_span};
 
 // Вид синтаксической конструкции.
 //
@@ -79,7 +85,7 @@ pub struct SyntaxSpan {
 }
 
 // Состояние разбора: текст, текущая строка, стеки и диапазоны.
-pub(crate) struct ResolveState<'a> {
+pub(crate) struct ResolveState<'a, 's> {
     pub text: &'a [u8],
     // Границы текущей строки — известны из карты строк (этап 1).
     pub line_start: usize,
@@ -90,9 +96,15 @@ pub(crate) struct ResolveState<'a> {
     // Блочные конструкции (%%%/$$$/!!!/@@): переживают строки, закрываются
     // `}` строго в начале строки.
     pub block_stack: Vec<(SyntaxKind, usize)>,
+    // Открытый line-close маркер текущей строки (%%/$$/!!/`>`): один на
+    // строку, потому что открывается только в начале строки. Спан рождается
+    // в момент готовности — при `}` или в конце строки.
+    pub pending_line_close: Option<(SyntaxKind, usize)>,
+    // Стрим-синк: если есть, каждый спан отдаётся сразу при создании.
+    pub sink: Option<&'s mut dyn SpanSink>,
 }
 
-impl<'a> ResolveState<'a> {
+impl<'a, 's> ResolveState<'a, 's> {
     pub(crate) fn new(text: &'a [u8]) -> Self {
         ResolveState {
             text,
@@ -101,6 +113,18 @@ impl<'a> ResolveState<'a> {
             spans: Vec::new(),
             inline_stack: Vec::new(),
             block_stack: Vec::new(),
+            pending_line_close: None,
+            sink: None,
+        }
+    }
+
+    // Создаёт спан и сразу отдаёт его синку, если он есть.
+    // Спан всегда финальный: править его после создания не нужно.
+    #[inline]
+    pub(crate) fn emit(&mut self, span: SyntaxSpan) {
+        self.spans.push(span);
+        if let Some(sink) = self.sink.as_deref_mut() {
+            dispatch_span(sink, span);
         }
     }
 }
@@ -118,7 +142,7 @@ impl<'a> ResolveState<'a> {
 // что стоит ~5 мкс на вызовах. Принудительный инлайн делает
 // производительность независимой от разбиения на юниты.
 #[inline(always)]
-pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usize, len: usize) {
+pub(crate) fn process_marker(state: &mut ResolveState<'_, '_>, byte: u8, start: usize, len: usize) {
     let end = start + len;
     match byte {
         b')' if len >= 2 => close_inline_markers(state, start, end),
@@ -132,24 +156,36 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_>, byte: u8, start: usiz
 // - в начале строки → закрытие блока (%%%/$$$/!!!/@@)
 // - mid-line → закрытие line-close (%%/$$/!!/`>`)
 #[inline]
-fn close_brace(state: &mut ResolveState<'_>, start: usize, end: usize) {
+fn close_brace(state: &mut ResolveState<'_, '_>, start: usize, end: usize) {
     if start == state.line_start {
         // Блок: закрывается строго в начале строки, без правила пробелов.
         if let Some((kind, open_position)) = state.block_stack.pop() {
-            state.spans.push(SyntaxSpan {
+            state.emit(SyntaxSpan {
                 start: open_position,
                 end,
                 kind,
             });
         }
     } else {
-        close_line_marker(state, start, end);
+        // Line-close: спан рождается здесь, уже финальный.
+        let text = state.text;
+        // Правило пробелов: перед `}` не должно быть пробела.
+        if start > 0 && text[start - 1] == b' ' {
+            return;
+        }
+        if let Some((kind, open_position)) = state.pending_line_close.take() {
+            state.emit(SyntaxSpan {
+                start: open_position,
+                end,
+                kind,
+            });
+        }
     }
 }
 
 // Универсальная inline-закрывашка `))`: закрывает все открытые inline.
 #[inline]
-fn close_inline_markers(state: &mut ResolveState<'_>, start: usize, end: usize) {
+fn close_inline_markers(state: &mut ResolveState<'_, '_>, start: usize, end: usize) {
     let text = state.text;
     // Нет открытого состояния — не закрывашка.
     if state.inline_stack.is_empty() {
@@ -160,7 +196,7 @@ fn close_inline_markers(state: &mut ResolveState<'_>, start: usize, end: usize) 
         return;
     }
     while let Some((kind, open_position)) = state.inline_stack.pop() {
-        state.spans.push(SyntaxSpan {
+        state.emit(SyntaxSpan {
             start: open_position,
             end,
             kind,
@@ -168,31 +204,9 @@ fn close_inline_markers(state: &mut ResolveState<'_>, start: usize, end: usize) 
     }
 }
 
-// Контекстная line-close закрывашка `}`: укорачивает уже созданный спан
-// текущей строки (диапазон закрыт сразу при маркере до конца строки).
-#[inline]
-fn close_line_marker(state: &mut ResolveState<'_>, start: usize, end: usize) {
-    let text = state.text;
-    // Правило пробелов: перед `}` не должно быть пробела.
-    if start > 0 && text[start - 1] == b' ' {
-        return;
-    }
-    // Последний line-close спан текущей строки, ещё не закрытый `}`:
-    // спаны идут в порядке открытия, поэтому ищем с конца.
-    for span in state.spans.iter_mut().rev() {
-        if is_line_close_kind(span.kind)
-            && span.start >= state.line_start
-            && span.end == state.line_end
-        {
-            span.end = end;
-            return;
-        }
-    }
-}
-
 // Нумерованный список `1. ` — цифры от начала строки, затем пробел.
 #[inline]
-fn try_numbered_list(state: &mut ResolveState<'_>, start: usize) {
+fn try_numbered_list(state: &mut ResolveState<'_, '_>, start: usize) {
     let text = state.text;
     let mut numbered = start > state.line_start;
     if numbered {
@@ -204,7 +218,7 @@ fn try_numbered_list(state: &mut ResolveState<'_>, start: usize) {
         }
     }
     if numbered && text.get(start + 1).is_none_or(|&byte| byte == b' ') {
-        state.spans.push(SyntaxSpan {
+        state.emit(SyntaxSpan {
             start: state.line_start,
             end: state.line_end,
             kind: SyntaxKind::ListItem,
@@ -216,7 +230,7 @@ fn try_numbered_list(state: &mut ResolveState<'_>, start: usize) {
 // inline(always): вызывается только из process_marker; инлайн закрепляет
 // выигрыш, который иначе зависит от случайного распределения codegen-юнитов.
 #[inline(always)]
-fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize, end: usize) {
+fn open_marker(state: &mut ResolveState<'_, '_>, byte: u8, len: usize, start: usize, end: usize) {
     let text = state.text;
     // Блок (%%%/$$$/!!!/@@) — строго в начале строки.
     if start == state.line_start {
@@ -224,28 +238,20 @@ fn open_marker(state: &mut ResolveState<'_>, byte: u8, len: usize, start: usize,
             state.block_stack.push((kind, start));
             return;
         }
-    }
-    // Line-close открытие (%%/$$/!!/`>`) — диапазон сразу до конца строки:
-    // граница уже известна из карты строк, копить открытия не нужно.
-    if let Some(kind) = line_close_marker_kind(byte, len) {
-        if byte == b'>' {
-            if start != state.line_start {
+        // Line-close открытие (%%/$$/!!/`>`) — только в начале строки.
+        // Спан не создаётся: маркер ждёт в слоте до `}` или конца строки.
+        if let Some(kind) = line_close_marker_kind(byte, len) {
+            if byte != b'>' && end < text.len() && text[end] == b' ' {
                 return;
             }
-        } else if end < text.len() && text[end] == b' ' {
+            state.pending_line_close = Some((kind, start));
             return;
         }
-        state.spans.push(SyntaxSpan {
-            start,
-            end: state.line_end,
-            kind,
-        });
-        return;
-    }
-    // Line (not-close) маркеры — только в начале строки.
-    if start == state.line_start && is_line_not_close_byte(byte) {
-        if let Some(kind) = try_line_not_close(text, byte, start, len, state.line_end) {
-            state.spans.push(SyntaxSpan {
+        // Line (not-close) маркеры — только в начале строки.
+        if is_line_not_close_byte(byte)
+            && let Some(kind) = try_line_not_close(text, byte, start, len, state.line_end)
+        {
+            state.emit(SyntaxSpan {
                 start,
                 end: state.line_end,
                 kind,
@@ -299,18 +305,6 @@ fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
         (b'`', 2) => Some(SyntaxKind::CodeLine),
         _ => None,
     }
-}
-
-// Line-close виды: закрываются `}` или действуют до конца строки.
-fn is_line_close_kind(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::CommentLine
-            | SyntaxKind::FormulaLine
-            | SyntaxKind::SpoilerLine
-            | SyntaxKind::Quote
-            | SyntaxKind::CodeLine
-    )
 }
 
 // Свойство блочного маркера (%%%/$$$/!!! и @@) — многострочный,
@@ -536,14 +530,9 @@ mod tests {
     }
 
     #[test]
-    fn comment_mid_line() {
-        // line-close маркер работает с любого места строки
-        let spans = parse_spans("Текст %%комментарий}");
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.kind == SyntaxKind::CommentLine)
-        );
+    fn comment_mid_line_ignored() {
+        // line-close маркер работает только с начала строки — mid-line %% текст.
+        assert!(parse_spans("Текст %%комментарий}").is_empty());
     }
 
     #[test]
@@ -600,18 +589,14 @@ mod tests {
     }
 
     #[test]
-    fn spoiler_mid_line() {
-        let spans = parse_spans("Текст !!скрытое содержимое}");
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.kind == SyntaxKind::SpoilerLine)
-        );
+    fn spoiler_mid_line_ignored() {
+        // line-close маркер работает только с начала строки — mid-line !! текст.
+        assert!(parse_spans("Текст !!скрытое содержимое}").is_empty());
     }
 
     #[test]
     fn formula_line() {
-        let spans = parse_spans("x = 5 $$sqrt(x)}");
+        let spans = parse_spans("$$sqrt(x)}");
         assert!(
             spans
                 .iter()
@@ -627,23 +612,16 @@ mod tests {
 
     #[test]
     fn line_close_lifo_on_same_line() {
-        // %%a $$b} x — `}` укорачивает последний открытый line-close ($$),
-        // первый (%% ) действует до конца строки.
+        // %%a $$b} x — $$ mid-line не маркер (только начало строки),
+        // `}` закрывает единственный line-close строки (%%).
         let spans = parse_spans("%%a $$b} x");
         assert_eq!(
             spans,
-            vec![
-                SyntaxSpan {
-                    start: 0,
-                    end: 10,
-                    kind: SyntaxKind::CommentLine
-                },
-                SyntaxSpan {
-                    start: 4,
-                    end: 8,
-                    kind: SyntaxKind::FormulaLine
-                },
-            ]
+            vec![SyntaxSpan {
+                start: 0,
+                end: 8,
+                kind: SyntaxKind::CommentLine
+            }]
         );
     }
 
@@ -827,9 +805,9 @@ mod tests {
             Zoll — это **язык разметки)) с поддержкой //курсива)), \
             __подчёркивания)) и ~~зачёркивания)).\n\n\
             ==Важно:)) этот текст подсвечен.\n\n\
-            Текст %%эта часть не видна}\n\n\
-            Обычный текст !!а это спойлер до конца строки}\n\n\
-            x = 5 $$sqrt(x)}\n";
+            %%эта часть не видна}\n\n\
+            !!а это спойлер до конца строки}\n\n\
+            $$sqrt(x)}\n";
         let spans = parse_spans(text);
         let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
         assert!(kinds.contains(&SyntaxKind::Header(1)));
@@ -928,7 +906,7 @@ mod tests {
     fn block_and_line_level_coexist() {
         // Блок открыт, внутри строки line-close комментарий закрывается
         // своей `}` mid-line, блок — своей в начале строки.
-        let spans = parse_spans("%%%\nтекст %%скрыто}\n}");
+        let spans = parse_spans("%%%\n%%скрыто}\n}");
         let kinds: Vec<SyntaxKind> = spans.iter().map(|span| span.kind).collect();
         assert_eq!(
             kinds,
@@ -981,14 +959,9 @@ mod tests {
     }
 
     #[test]
-    fn line_close_mid_line_unclosed_to_eol() {
-        // %% в середине строки без } — спан до конца строки.
-        let spans = parse_spans("Текст %%скрыто");
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.kind == SyntaxKind::CommentLine)
-        );
+    fn line_close_mid_line_unclosed_to_eol_ignored() {
+        // %% в середине строки без } — не маркер (только начало строки).
+        assert!(parse_spans("Текст %%скрыто").is_empty());
     }
 
     // ─── Метаданные (@@) ─────────────────────────────────────────

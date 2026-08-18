@@ -4,8 +4,13 @@
 //! |--------|-----------|:----:|:--------------:|:---------:|:---------:|
 //! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> | — | ✅ Vec<BlockEvent> |
 //! | `html_render` | Парсинг + рендер в HTML | — | ✅ | ✅ | ✅ |
-//! | `zoll_breakdown` | scan (маски) vs полный проход | ✅ | — | — | — |
-//! | `full_markup` | Полная палитра конструкций (вкл. блочные) | ✅ | ✅ | — | ✅ |
+//! | `zoll_breakdown` | scan (маски) vs полный проход (батч и стрим) | ✅ | — | — | — |
+//! | `full_markup` | Полная палитра конструкций (вкл. блочные), батч и стрим | ✅ | ✅ | — | ✅ |
+//!
+//! Стрим-варианты (`*_stream`, `*_stream_ttfs`) живут в тех же группах,
+//! что и батч, на том же документе: `*_stream` — полное время парсинга
+//! с отдачей спанов по мере готовности, `*_stream_ttfs` — время до
+//! первого спана (time-to-first-span).
 //!
 //! sparkdown (0.1.0) — HTML-only (scaffold, только абзацы), поэтому только
 //! в `html_render`. ferromark — стриминг событий без HTML (BlockParser),
@@ -18,8 +23,9 @@
 //! Результаты: `target/criterion/report/index.html`
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::time::{Duration, Instant};
 
-use zoll::engine::{Engine, INTERESTING_BYTES, scan};
+use zoll::engine::{Engine, INTERESTING_BYTES, SpanSink, scan};
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -44,10 +50,10 @@ fn generate_zoll_doc(lines: usize) -> String {
             4 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
             5 => s.push_str(&format!("Plain text {} ~~strike)) __underline))\n", i)),
             6 => s.push_str(&format!("++insert)) --delete)) ''super)) ,,sub)) {}\n", i)),
-            7 => s.push_str(&format!("visible text %%comment {}}}\n", i)),
-            8 => s.push_str(&format!("text !!spoiler hidden {}}}\n", i)),
+            7 => s.push_str(&format!("%%comment {}}}\n", i)),
+            8 => s.push_str(&format!("!!spoiler hidden {}}}\n", i)),
             9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            10 => s.push_str(&format!("x = {} $$sqrt({})}}\n", i, i)),
+            10 => s.push_str(&format!("$$sqrt({})}}\n", i)),
             11 => s.push_str(&format!("plain text line {}\n", i)),
             _ => unreachable!(),
         }
@@ -112,9 +118,9 @@ fn generate_full_markup_doc(lines: usize) -> String {
             6 => s.push_str(&format!("#:tag{}\n", i)),
             7 => s.push_str("---\n"),
             8 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            9 => s.push_str(&format!("visible text %%comment {}}}\n", i)),
-            10 => s.push_str(&format!("x = {} $$sqrt({})}}\n", i, i)),
-            11 => s.push_str(&format!("text !!spoiler {}}}\n", i)),
+            9 => s.push_str(&format!("%%comment {}}}\n", i)),
+            10 => s.push_str(&format!("$$sqrt({})}}\n", i)),
+            11 => s.push_str(&format!("!!spoiler {}}}\n", i)),
             12 => s.push_str(&format!("!!заголовок: скрытое {}}}\n", i)),
             13 => s.push_str(&format!("%%%\nblock comment {}\n}}\n", i)),
             14 => s.push_str(&format!("$$$\nblock formula {}\n}}\n", i)),
@@ -206,6 +212,29 @@ fn bench_parse_spans(c: &mut Criterion) {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
             black_box(engine.spans());
+        });
+    });
+
+    // Стрим на том же документе: спаны уходят по мере готовности.
+    group.bench_function("zoll_engine_parse_stream", |b| {
+        b.iter(|| {
+            let mut sink = BenchSink::new();
+            let engine = Engine::parse_into(black_box(zoll_doc.as_bytes()), &mut sink);
+            black_box((engine.spans().len(), sink.count));
+        });
+    });
+
+    // Время до первого спана (TTFS): редактор начинает рисовать раньше.
+    group.bench_function("zoll_engine_parse_stream_ttfs", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut sink = BenchSink::new();
+                Engine::parse_into(black_box(zoll_doc.as_bytes()), &mut sink);
+                total += sink.first_span_at.unwrap().duration_since(start);
+            }
+            total
         });
     });
 
@@ -307,6 +336,15 @@ fn bench_zoll_breakdown(c: &mut Criterion) {
         });
     });
 
+    // Полный парсинг со стрим-отдачей спанов по мере готовности.
+    group.bench_function("engine_parse_stream", |b| {
+        b.iter(|| {
+            let mut sink = BenchSink::new();
+            let engine = Engine::parse_into(black_box(text), &mut sink);
+            black_box((engine.spans().len(), sink.count));
+        });
+    });
+
     group.finish();
 }
 
@@ -326,6 +364,29 @@ fn bench_full_markup(c: &mut Criterion) {
         b.iter(|| {
             let engine = Engine::parse(black_box(zoll_doc.as_bytes()));
             black_box(engine.spans());
+        });
+    });
+
+    // Стрим на том же документе: спаны уходят по мере готовности.
+    group.bench_function("zoll_engine_parse_stream", |b| {
+        b.iter(|| {
+            let mut sink = BenchSink::new();
+            let engine = Engine::parse_into(black_box(zoll_doc.as_bytes()), &mut sink);
+            black_box((engine.spans().len(), sink.count));
+        });
+    });
+
+    // Время до первого спана (TTFS): редактор начинает рисовать раньше.
+    group.bench_function("zoll_engine_parse_stream_ttfs", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                let mut sink = BenchSink::new();
+                Engine::parse_into(black_box(zoll_doc.as_bytes()), &mut sink);
+                total += sink.first_span_at.unwrap().duration_since(start);
+            }
+            total
         });
     });
 
@@ -351,6 +412,85 @@ fn bench_full_markup(c: &mut Criterion) {
     });
 
     group.finish();
+}
+
+// ─── 5. Стрим-доставка спанов ──────────────────────────────────
+//
+// Стрим отдаёт спаны по мере готовности, батч — все разом после
+// парсинга. Стрим-варианты живут в тех же группах, что и батч, на
+// том же документе — сравнение честное. Метрики:
+// - *_stream: полное время (парсинг + доставка);
+// - *_stream_ttfs: время до ПЕРВОГО спана (time-to-first-span) —
+//   главный выигрыш стрима: редактор начинает рисовать раньше.
+
+// Синк для бенча: считает спаны и запоминает время первого вызова.
+struct BenchSink {
+    count: usize,
+    first_span_at: Option<Instant>,
+}
+
+impl BenchSink {
+    fn new() -> Self {
+        BenchSink {
+            count: 0,
+            first_span_at: None,
+        }
+    }
+
+    fn record(&mut self) {
+        if self.count == 0 {
+            self.first_span_at = Some(Instant::now());
+        }
+        self.count += 1;
+    }
+}
+
+// Все ручки одинаковые: посчитать спан. Макрос вместо 30 копипаст.
+macro_rules! bench_sink_methods {
+    ($($method:ident),* $(,)?) => {
+        $(
+            fn $method(&mut self, _start: usize, _end: usize) {
+                self.record();
+            }
+        )*
+    };
+}
+
+impl SpanSink for BenchSink {
+    fn begin_revision(&mut self, _revision: u64) {}
+    bench_sink_methods!(
+        on_bold,
+        on_italic,
+        on_underline,
+        on_strikethrough,
+        on_highlight,
+        on_insertion,
+        on_deletion,
+        on_superscript,
+        on_subscript,
+        on_formula_inline,
+        on_comment_inline,
+        on_spoiler_inline,
+        on_code_inline,
+        on_tag,
+        on_quote,
+        on_list_item,
+        on_table_row,
+        on_thematic_break,
+        on_formula_line,
+        on_comment_line,
+        on_spoiler_line,
+        on_code_line,
+        on_formula_block,
+        on_comment_block,
+        on_spoiler_block,
+        on_code_block,
+        on_metadata,
+    );
+    fn on_header(&mut self, _start: usize, _end: usize, _level: u32) {
+        self.record();
+    }
+    fn end_revision(&mut self) {}
 }
 
 criterion_group!(
