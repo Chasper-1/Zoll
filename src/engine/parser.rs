@@ -123,7 +123,9 @@ pub(crate) fn parse_document_into(
     sink: Option<&mut dyn SpanSink>,
 ) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // ─── Этап 1: регистры SIMD → готовые строки ───
-    let mut newline_positions: Vec<usize> = Vec::new();
+    // Сразу с запасом: 1/16 документа (средняя строка ~30-80 байт) —
+    // без перевыделений на любом разумном документе.
+    let mut newline_positions: Vec<usize> = Vec::with_capacity(text.len() / 16 + 16);
     scan(text, b"\n", |offset, mask| {
         let mut remaining = mask;
         while remaining != 0 {

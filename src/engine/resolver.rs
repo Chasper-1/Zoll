@@ -106,13 +106,17 @@ pub(crate) struct ResolveState<'a, 's> {
 
 impl<'a, 's> ResolveState<'a, 's> {
     pub(crate) fn new(text: &'a [u8]) -> Self {
+        // Ёмкость сразу по размеру текста: 1/16 документа. Список спанов
+        // растёт по ходу парсинга, и без запаса перевыделение копировало бы
+        // всё накопленное (~13 раз за большой документ). С запасом 1/16
+        // реаллоки исчезают: чуть больше памяти сразу — но это дёшево.
         ResolveState {
             text,
             line_start: 0,
             line_end: text.len(),
-            spans: Vec::new(),
-            inline_stack: Vec::new(),
-            block_stack: Vec::new(),
+            spans: Vec::with_capacity(text.len() / 16 + 16),
+            inline_stack: Vec::with_capacity(4),
+            block_stack: Vec::with_capacity(4),
             pending_line_close: None,
             sink: None,
         }
