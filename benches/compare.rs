@@ -40,18 +40,18 @@ fn generate_zoll_doc(lines: usize) -> String {
     for i in 0..lines.saturating_sub(3) {
         let section = i % 12;
         match section {
-            0 => s.push_str(&format!("#2 Section {}\n", i / 10)),
-            1 => s.push_str(&format!("This is **bold {})) and //italic {})) text\n",i, i)),
-            2 => s.push_str(&format!("- list item {} with **bold))\n", i)),
-            3 => s.push_str(&format!("1. numbered item {} with //italic))\n", i)),
-            4 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
-            5 => s.push_str(&format!("Plain text {} ~~strike)) __underline))\n", i)),
-            6 => s.push_str(&format!("++insert)) --delete)) ''super)) ,,sub)) {}\n", i)),
-            7 => s.push_str(&format!("%%this is a comment line {}}}\n", i)),
-            8 => s.push_str(&format!("!!spoiler hidden {}}}\n", i)),
-            9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            10 => s.push_str(&format!("$$sqrt({})}}\n", i)),
-            11 => s.push_str(&format!("plain text line {}\n", i)),
+            0 => s.push_str("#2 Section\n"),
+            1 => s.push_str("This is **bold)) and //italic)) text\n"),
+            2 => s.push_str("- list item with **bold))\n"),
+            3 => s.push_str("1; numbered item with //italic))\n"),
+            4 => s.push_str("> quote line with ==highlight))\n"),
+            5 => s.push_str("Plain text ~~strike)) __underline))\n"),
+            6 => s.push_str("++insert)) --delete)) ''super)) ,,sub))\n"),
+            7 => s.push_str("%%this is a comment line}\n"),
+            8 => s.push_str("!!spoiler hidden}\n"),
+            9 => s.push_str("| cell | cell |\n"),
+            10 => s.push_str("$$sqrt(x)}\n"),
+            11 => s.push_str("plain text line\n"),
             _ => unreachable!(),
         }
     }
@@ -66,18 +66,18 @@ fn generate_md_doc(lines: usize) -> String {
     for i in 0..lines.saturating_sub(3) {
         let section = i % 12;
         match section {
-            0 => s.push_str(&format!("## Section {}\n", i / 10)),
-            1 => s.push_str(&format!("This is **bold {}** and *italic {}* text\n", i, i)),
-            2 => s.push_str(&format!("- list item {} with **bold**\n", i)),
-            3 => s.push_str(&format!("1. numbered item {} with *italic*\n", i)),
-            4 => s.push_str(&format!("> quote line {} with ==highlight==\n", i)),
-            5 => s.push_str(&format!("Plain text {} ~~strike~~ <u>underline</u>\n", i)),
-            6 => s.push_str(&format!("<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub> {}\n",i)),
+            0 => s.push_str("## Section\n"),
+            1 => s.push_str("This is **bold** and *italic* text\n"),
+            2 => s.push_str("- list item with **bold**\n"),
+            3 => s.push_str("1. numbered item with *italic*\n"),
+            4 => s.push_str("> quote line with ==highlight==\n"),
+            5 => s.push_str("Plain text ~~strike~~ <u>underline</u>\n"),
+            6 => s.push_str("<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub>\n"),
             7 => s.push_str("<!-- this is a comment line -->\n"),
-            8 => s.push_str(&format!("||spoiler hidden content at line {}||\n", i)),
-            9 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            10 => s.push_str(&format!("$$ sqrt({}) $$\n", i)),
-            11 => s.push_str(&format!("plain text line {}\n", i)),
+            8 => s.push_str("||spoiler hidden content||\n"),
+            9 => s.push_str("| cell | cell |\n"),
+            10 => s.push_str("$$ sqrt(x) $$\n"),
+            11 => s.push_str("plain text line\n"),
             _ => unreachable!(),
         }
     }
@@ -97,28 +97,22 @@ fn generate_full_markup_doc(lines: usize) -> String {
     for i in 0..cycles {
         let section = i % 16;
         match section {
-            0 => s.push_str(&format!("#2 Section {}\n", i)),
-            1 => s.push_str(&format!(
-                "**bold {})) //italic {})) __underline{})) ~~strike{}))\n",
-                i, i, i, i
-            )),
-            2 => s.push_str(&format!(
-                "==highlight{})) ++insert{})) --delete{})) ''super{})) ,,sub{})) $x_{}))\n",
-                i, i, i, i, i, i
-            )),
-            3 => s.push_str(&format!("- list item {} with **bold))\n", i)),
-            4 => s.push_str(&format!("1. numbered item {} with //italic))\n", i)),
-            5 => s.push_str(&format!("> quote line {} with ==highlight))\n", i)),
-            6 => s.push_str(&format!("#:tag{}\n", i)),
+            0 => s.push_str("#2 Section\n"),
+            1 => s.push_str("**bold)) //italic)) __underline)) ~~strike))\n"),
+            2 => s.push_str("==highlight)) ++insert)) --delete)) ''super)) ,,sub)) $x))\n"),
+            3 => s.push_str("- list item with **bold))\n"),
+            4 => s.push_str("1; numbered item with //italic))\n"),
+            5 => s.push_str("> quote line with ==highlight))\n"),
+            6 => s.push_str("#:tag\n"),
             7 => s.push_str("---\n"),
-            8 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
-            9 => s.push_str(&format!("%%comment {}}}\n", i)),
-            10 => s.push_str(&format!("$$sqrt({})}}\n", i)),
-            11 => s.push_str(&format!("!!spoiler {}}}\n", i)),
-            12 => s.push_str(&format!("!!заголовок: скрытое {}}}\n", i)),
-            13 => s.push_str(&format!("%%%\nblock comment {}\n}}\n", i)),
-            14 => s.push_str(&format!("$$$\nblock formula {}\n}}\n", i)),
-            15 => s.push_str(&format!("!!!спойлер:\nblock spoiler {}\n}}\n", i)),
+            8 => s.push_str("| cell | cell |\n"),
+            9 => s.push_str("%%comment}\n"),
+            10 => s.push_str("$$sqrt(x)}\n"),
+            11 => s.push_str("!!spoiler}\n"),
+            12 => s.push_str("!!заголовок: скрытое}\n"),
+            13 => s.push_str("%%%\nblock comment\n}\n"),
+            14 => s.push_str("$$$\nblock formula\n}\n"),
+            15 => s.push_str("!!!спойлер:\nblock spoiler\n}\n"),
             _ => unreachable!(),
         }
     }
@@ -134,29 +128,25 @@ fn generate_full_markup_md(lines: usize) -> String {
     for i in 0..cycles {
         let section = i % 16;
         match section {
-            0 => s.push_str(&format!("## Section {}\n", i)),
-            1 => s.push_str(&format!(
-                "**bold {}** *italic {}* <u>underline {}</u> ~~strike {}~~\n",
-                i, i, i, i
-            )),
-            2 => s.push_str(&format!(
-                "<mark>highlight {}</mark> <ins>insert {}</ins> <del>delete {}</del> \
-                 <sup>super {}</sup> <sub>sub {}</sub> $x_{}$\n",
-                i, i, i, i, i, i
-            )),
-            3 => s.push_str(&format!("- list item {} with **bold**\n", i)),
-            4 => s.push_str(&format!("1. numbered item {} with *italic*\n", i)),
-            5 => s.push_str(&format!("> quote line {} with ==highlight==\n", i)),
-            6 => s.push_str(&format!("<!-- tag{} -->\n", i)),
+            0 => s.push_str("## Section\n"),
+            1 => s.push_str("**bold** *italic* <u>underline</u> ~~strike~~\n"),
+            2 => s.push_str(
+                "<mark>highlight</mark> <ins>insert</ins> <del>delete</del> \
+                 <sup>super</sup> <sub>sub</sub> $x$\n",
+            ),
+            3 => s.push_str("- list item with **bold**\n"),
+            4 => s.push_str("1. numbered item with *italic*\n"),
+            5 => s.push_str("> quote line with ==highlight==\n"),
+            6 => s.push_str("<!-- tag -->\n"),
             7 => s.push_str("---\n"),
-            8 => s.push_str(&format!("| cell {} | cell {} |\n", i, i + 1)),
+            8 => s.push_str("| cell | cell |\n"),
             9 => s.push_str("<!-- comment -->\n"),
-            10 => s.push_str(&format!("$$ x = {} + y $$\n", i)),
-            11 => s.push_str(&format!("||spoiler hidden {}||\n", i)),
-            12 => s.push_str(&format!("||spoiler title: hidden {}||\n", i)),
-            13 => s.push_str(&format!("<!--\nblock comment {}\n-->\n", i)),
-            14 => s.push_str(&format!("$$\nblock formula {}\n$$\n", i)),
-            15 => s.push_str(&format!("||\nblock spoiler {}\n||\n", i)),
+            10 => s.push_str("$$ x = y $$\n"),
+            11 => s.push_str("||spoiler hidden||\n"),
+            12 => s.push_str("||spoiler title: hidden||\n"),
+            13 => s.push_str("<!--\nblock comment\n-->\n"),
+            14 => s.push_str("$$\nblock formula\n$$\n"),
+            15 => s.push_str("||\nblock spoiler\n||\n"),
             _ => unreachable!(),
         }
     }
@@ -489,7 +479,7 @@ impl SpanSink for BenchSink {
         on_code_block,
         on_metadata,
     );
-    fn on_header(&mut self, _start: usize, _end: usize, _level: u32) {
+    fn on_header(&mut self, _start: usize, _end: usize, _level: u8) {
         self.record();
     }
     fn end_revision(&mut self) {}

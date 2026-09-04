@@ -34,6 +34,34 @@
 //! потом не нужно.
 
 use crate::engine::api::{SpanSink, dispatch_span};
+use crate::engine::parser::{CAT_DIGIT, CATEGORY};
+
+// Таблицы inline-маркеров: индекс по байту, значение — вид конструкции.
+// Вместо match-веток в горячем цикле: одна загрузка из L1. Две таблицы —
+// по длине маркера (2 и 1), потому что один байт может быть и line-,
+// и inline-маркером (`*` — список и bold, `$` — формула и line/block).
+const INLINE2: [Option<SyntaxKind>; 256] = {
+    let mut table = [None; 256];
+    table[b'*' as usize] = Some(SyntaxKind::Bold);
+    table[b'/' as usize] = Some(SyntaxKind::Italic);
+    table[b'_' as usize] = Some(SyntaxKind::Underline);
+    table[b'~' as usize] = Some(SyntaxKind::Strikethrough);
+    table[b'=' as usize] = Some(SyntaxKind::Highlight);
+    table[b'+' as usize] = Some(SyntaxKind::Insertion);
+    table[b'-' as usize] = Some(SyntaxKind::Deletion);
+    table[b'\'' as usize] = Some(SyntaxKind::Superscript);
+    table[b',' as usize] = Some(SyntaxKind::Subscript);
+    table
+};
+
+const INLINE1: [Option<SyntaxKind>; 256] = {
+    let mut table = [None; 256];
+    table[b'$' as usize] = Some(SyntaxKind::FormulaInline);
+    table[b'%' as usize] = Some(SyntaxKind::CommentInline);
+    table[b'!' as usize] = Some(SyntaxKind::SpoilerInline);
+    table[b'`' as usize] = Some(SyntaxKind::CodeInline);
+    table
+};
 
 // Вид синтаксической конструкции.
 //
@@ -58,7 +86,7 @@ pub enum SyntaxKind {
     SpoilerInline,
     CodeInline,
     // Line
-    Header(u32),
+    Header(u8),
     Tag,
     Quote,
     ListItem,
@@ -85,7 +113,7 @@ pub struct SyntaxSpan {
 }
 
 // Состояние разбора: текст, текущая строка, стеки и диапазоны.
-pub(crate) struct ResolveState<'a, 's> {
+pub(crate) struct ResolveState<'a, 's, S: SpanSink + ?Sized> {
     pub text: &'a [u8],
     // Границы текущей строки — известны из карты строк (этап 1).
     pub line_start: usize,
@@ -101,10 +129,11 @@ pub(crate) struct ResolveState<'a, 's> {
     // в момент готовности — при `}` или в конце строки.
     pub pending_line_close: Option<(SyntaxKind, usize)>,
     // Стрим-синк: если есть, каждый спан отдаётся сразу при создании.
-    pub sink: Option<&'s mut dyn SpanSink>,
+    // Generic: мономорфизация убирает виртуальный вызов из горячего пути.
+    pub sink: Option<&'s mut S>,
 }
 
-impl<'a, 's> ResolveState<'a, 's> {
+impl<'a, 's, S: SpanSink + ?Sized> ResolveState<'a, 's, S> {
     pub(crate) fn new(text: &'a [u8]) -> Self {
         // Ёмкость сразу по размеру текста: 1/16 документа. Список спанов
         // растёт по ходу парсинга, и без запаса перевыделение копировало бы
@@ -114,8 +143,8 @@ impl<'a, 's> ResolveState<'a, 's> {
             text,
             line_start: 0,
             line_end: text.len(),
-            spans: Vec::with_capacity(text.len() / 16 + 16),
-            inline_stack: Vec::with_capacity(4),
+            spans: Vec::with_capacity(text.len() / 12 + 16),
+            inline_stack: Vec::with_capacity(8),
             block_stack: Vec::with_capacity(4),
             pending_line_close: None,
             sink: None,
@@ -146,12 +175,17 @@ impl<'a, 's> ResolveState<'a, 's> {
 // что стоит ~5 мкс на вызовах. Принудительный инлайн делает
 // производительность независимой от разбиения на юниты.
 #[inline(always)]
-pub(crate) fn process_marker(state: &mut ResolveState<'_, '_>, byte: u8, start: usize, len: usize) {
+pub(crate) fn process_marker<S: SpanSink + ?Sized>(
+    state: &mut ResolveState<'_, '_, S>,
+    byte: u8,
+    start: usize,
+    len: usize,
+) {
     let end = start + len;
     match byte {
         b')' if len >= 2 => close_inline_markers(state, start, end),
         b'}' => close_brace(state, start, end),
-        b'.' => try_numbered_list(state, start),
+        b';' => try_semicolon_list(state, start),
         _ => open_marker(state, byte, len, start, end),
     }
 }
@@ -160,7 +194,11 @@ pub(crate) fn process_marker(state: &mut ResolveState<'_, '_>, byte: u8, start: 
 // - в начале строки → закрытие блока (%%%/$$$/!!!/@@)
 // - mid-line → закрытие line-close (%%/$$/!!/`>`)
 #[inline]
-fn close_brace(state: &mut ResolveState<'_, '_>, start: usize, end: usize) {
+fn close_brace<S: SpanSink + ?Sized>(
+    state: &mut ResolveState<'_, '_, S>,
+    start: usize,
+    end: usize,
+) {
     if start == state.line_start {
         // Блок: закрывается строго в начале строки, без правила пробелов.
         if let Some((kind, open_position)) = state.block_stack.pop() {
@@ -189,7 +227,11 @@ fn close_brace(state: &mut ResolveState<'_, '_>, start: usize, end: usize) {
 
 // Универсальная inline-закрывашка `))`: закрывает все открытые inline.
 #[inline]
-fn close_inline_markers(state: &mut ResolveState<'_, '_>, start: usize, end: usize) {
+fn close_inline_markers<S: SpanSink + ?Sized>(
+    state: &mut ResolveState<'_, '_, S>,
+    start: usize,
+    end: usize,
+) {
     let text = state.text;
     // Нет открытого состояния — не закрывашка.
     if state.inline_stack.is_empty() {
@@ -208,14 +250,15 @@ fn close_inline_markers(state: &mut ResolveState<'_, '_>, start: usize, end: usi
     }
 }
 
-// Нумерованный список `1. ` — цифры от начала строки, затем пробел.
+// Нумерованный список `1; ` — цифры от начала строки, затем пробел.
+// Проверка цифр — через таблицу категорий (CATEGORY), без is_ascii_digit.
 #[inline]
-fn try_numbered_list(state: &mut ResolveState<'_, '_>, start: usize) {
+fn try_semicolon_list<S: SpanSink + ?Sized>(state: &mut ResolveState<'_, '_, S>, start: usize) {
     let text = state.text;
     let mut numbered = start > state.line_start;
     if numbered {
         for &byte in &text[state.line_start..start] {
-            if !byte.is_ascii_digit() {
+            if CATEGORY[byte as usize] != CAT_DIGIT {
                 numbered = false;
                 break;
             }
@@ -231,151 +274,168 @@ fn try_numbered_list(state: &mut ResolveState<'_, '_>, start: usize) {
 }
 
 // Открытие маркера: блок, line-close, line (not-close) или inline.
-// inline(always): вызывается только из process_marker; инлайн закрепляет
-// выигрыш, который иначе зависит от случайного распределения codegen-юнитов.
+// Единый match (byte, len): один диспетчер вместо цепочки из пяти
+// (block_marker_kind → line_close_marker_kind → is_line_not_close_byte →
+// try_line_not_close → inline_marker_kind). Проверка «в начале строки»
+// выполняется внутри веток — только для line-маркеров, inline не платит.
+// inline(always): вызывается из маркерного цикла ~10-15 тысяч раз за
+// парсинг; принудительный инлайн делает производительность независимой
+// от разбиения на codegen-юниты.
 #[inline(always)]
-fn open_marker(state: &mut ResolveState<'_, '_>, byte: u8, len: usize, start: usize, end: usize) {
+fn open_marker<S: SpanSink + ?Sized>(
+    state: &mut ResolveState<'_, '_, S>,
+    byte: u8,
+    len: usize,
+    start: usize,
+    end: usize,
+) {
     let text = state.text;
-    // Блок (%%%/$$$/!!!/@@) — строго в начале строки.
-    if start == state.line_start {
-        if let Some(kind) = block_marker_kind(byte, len) {
-            state.block_stack.push((kind, start));
-            return;
+    match (byte, len) {
+        // Блок (%%%/$$$/!!!/@@) — строго в начале строки.
+        (b'%', 3) | (b'$', 3) | (b'!', 3) | (b'`', 3) | (b'@', 2) => {
+            if start == state.line_start {
+                let kind = match byte {
+                    b'%' => SyntaxKind::CommentBlock,
+                    b'$' => SyntaxKind::FormulaBlock,
+                    b'!' => SyntaxKind::SpoilerBlock,
+                    b'`' => SyntaxKind::CodeBlock,
+                    _ => SyntaxKind::Metadata,
+                };
+                state.block_stack.push((kind, start));
+            }
         }
         // Line-close открытие (%%/$$/!!/`>`) — только в начале строки.
         // Спан не создаётся: маркер ждёт в слоте до `}` или конца строки.
-        if let Some(kind) = line_close_marker_kind(byte, len) {
-            if byte != b'>' && end < text.len() && text[end] == b' ' {
-                return;
+        (b'%', 2) | (b'$', 2) | (b'!', 2) | (b'`', 2) => {
+            if start == state.line_start {
+                if end < text.len() && text[end] == b' ' {
+                    return;
+                }
+                let kind = match byte {
+                    b'%' => SyntaxKind::CommentLine,
+                    b'$' => SyntaxKind::FormulaLine,
+                    b'!' => SyntaxKind::SpoilerLine,
+                    _ => SyntaxKind::CodeLine,
+                };
+                state.pending_line_close = Some((kind, start));
             }
-            state.pending_line_close = Some((kind, start));
-            return;
+        }
+        (b'>', 1) => {
+            if start == state.line_start {
+                state.pending_line_close = Some((SyntaxKind::Quote, start));
+            }
         }
         // Line (not-close) маркеры — только в начале строки.
-        if is_line_not_close_byte(byte)
-            && let Some(kind) = try_line_not_close(text, byte, start, len, state.line_end)
-        {
-            state.emit(SyntaxSpan {
-                start,
-                end: state.line_end,
-                kind,
-            });
-            return;
+        (b'#', _) => {
+            if start == state.line_start {
+                // Тег `#:имя`
+                if text.get(start + 1) == Some(&b':') {
+                    state.emit(SyntaxSpan {
+                        start,
+                        end: state.line_end,
+                        kind: SyntaxKind::Tag,
+                    });
+                    return;
+                }
+                // Заголовок `#N ` — цифры (таблица CATEGORY), затем пробел
+                // или конец строки. Уровень u8: максимум 3 цифры, ≤ 255.
+                let after = &text[start + 1..state.line_end];
+                let mut level: u32 = 0;
+                let mut digits = 0;
+                for &byte in after
+                    .iter()
+                    .take_while(|&&b| CATEGORY[b as usize] == CAT_DIGIT)
+                    .take(3)
+                {
+                    level = level * 10 + (byte - b'0') as u32;
+                    digits += 1;
+                }
+                if digits > 0 {
+                    let rest = &after[digits..];
+                    if (rest.is_empty() || rest[0] == b' ') && level <= 255 {
+                        state.emit(SyntaxSpan {
+                            start,
+                            end: state.line_end,
+                            kind: SyntaxKind::Header(level as u8),
+                        });
+                    }
+                }
+            }
         }
-    }
-    // Inline-открытие.
-    if let Some(kind) = inline_marker_kind(byte, len) {
-        // Правило пробелов: после открывашки не должно быть пробела.
-        if end < text.len() && text[end] == b' ' {
-            return;
+        (b'-', 1) => {
+            if start == state.line_start && start + 1 < text.len() && text[start + 1] == b' ' {
+                state.emit(SyntaxSpan {
+                    start,
+                    end: state.line_end,
+                    kind: SyntaxKind::ListItem,
+                });
+            }
         }
-        state.inline_stack.push((kind, start));
+        (b'-', _) if len >= 3 => {
+            if start == state.line_start && &text[start..state.line_end] == b"---" {
+                state.emit(SyntaxSpan {
+                    start,
+                    end: state.line_end,
+                    kind: SyntaxKind::ThematicBreak,
+                });
+            }
+        }
+        (b'*', 1) | (b'+', 1) => {
+            if start == state.line_start && start + 1 < text.len() && text[start + 1] == b' ' {
+                state.emit(SyntaxSpan {
+                    start,
+                    end: state.line_end,
+                    kind: SyntaxKind::ListItem,
+                });
+            }
+        }
+        (b'|', _) => {
+            if start == state.line_start {
+                state.emit(SyntaxSpan {
+                    start,
+                    end: state.line_end,
+                    kind: SyntaxKind::TableRow,
+                });
+            }
+        }
+        // Inline-открытие: таблица по байту (одна загрузка из L1 вместо
+        // match-веток), правило пробелов + push в стек.
+        (b'*', 2)
+        | (b'/', 2)
+        | (b'_', 2)
+        | (b'~', 2)
+        | (b'=', 2)
+        | (b'+', 2)
+        | (b'-', 2)
+        | (b'\'', 2)
+        | (b',', 2) => {
+            if let Some(kind) = INLINE2[byte as usize] {
+                push_inline(state, kind, start, end, text);
+            }
+        }
+        (b'$', 1) | (b'%', 1) | (b'!', 1) | (b'`', 1) => {
+            if let Some(kind) = INLINE1[byte as usize] {
+                push_inline(state, kind, start, end, text);
+            }
+        }
+        _ => {}
     }
 }
 
-// Может ли байт начинать line (not-close) маркер
-// (заголовок/тег/список/таблица).
-fn is_line_not_close_byte(byte: u8) -> bool {
-    matches!(byte, b'#' | b'|' | b'*' | b'-' | b'+')
-}
-
-// Свойство inline-маркера по байту и длине последовательности.
-fn inline_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
-    match (byte, len) {
-        (b'*', 2) => Some(SyntaxKind::Bold),
-        (b'/', 2) => Some(SyntaxKind::Italic),
-        (b'_', 2) => Some(SyntaxKind::Underline),
-        (b'~', 2) => Some(SyntaxKind::Strikethrough),
-        (b'=', 2) => Some(SyntaxKind::Highlight),
-        (b'+', 2) => Some(SyntaxKind::Insertion),
-        (b'-', 2) => Some(SyntaxKind::Deletion),
-        (b'\'', 2) => Some(SyntaxKind::Superscript),
-        (b',', 2) => Some(SyntaxKind::Subscript),
-        (b'$', 1) => Some(SyntaxKind::FormulaInline),
-        (b'%', 1) => Some(SyntaxKind::CommentInline),
-        (b'!', 1) => Some(SyntaxKind::SpoilerInline),
-        (b'`', 1) => Some(SyntaxKind::CodeInline),
-        _ => None,
-    }
-}
-
-// Свойство line-close маркера (%%/$$/!!/`>`) — закрывается `}` или до конца строки.
-fn line_close_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
-    match (byte, len) {
-        (b'%', 2) => Some(SyntaxKind::CommentLine),
-        (b'$', 2) => Some(SyntaxKind::FormulaLine),
-        (b'!', 2) => Some(SyntaxKind::SpoilerLine),
-        (b'>', 1) => Some(SyntaxKind::Quote),
-        (b'`', 2) => Some(SyntaxKind::CodeLine),
-        _ => None,
-    }
-}
-
-// Свойство блочного маркера (%%%/$$$/!!! и @@) — многострочный,
-// закрывается `}` строго в начале строки.
-fn block_marker_kind(byte: u8, len: usize) -> Option<SyntaxKind> {
-    match (byte, len) {
-        (b'%', 3) => Some(SyntaxKind::CommentBlock),
-        (b'$', 3) => Some(SyntaxKind::FormulaBlock),
-        (b'!', 3) => Some(SyntaxKind::SpoilerBlock),
-        (b'`', 3) => Some(SyntaxKind::CodeBlock),
-        (b'@', 2) => Some(SyntaxKind::Metadata),
-        _ => None,
-    }
-}
-
-// Line (not-close) маркер в начале строки. Конец строки `line_end` уже
-// готов из карты строк — сканировать текст не нужно.
-fn try_line_not_close(
-    text: &[u8],
-    byte: u8,
+// Inline-открытие: правило пробелов (после открывашки не должно быть
+// пробела) + push в стек.
+#[inline(always)]
+fn push_inline<S: SpanSink + ?Sized>(
+    state: &mut ResolveState<'_, '_, S>,
+    kind: SyntaxKind,
     start: usize,
-    len: usize,
-    line_end: usize,
-) -> Option<SyntaxKind> {
-    match byte {
-        b'#' => {
-            // Тег `#:имя`
-            if text.get(start + 1) == Some(&b':') {
-                return Some(SyntaxKind::Tag);
-            }
-            // Заголовок `#N ` — цифры, затем пробел или конец строки.
-            let after = &text[start + 1..line_end];
-            let mut level: u32 = 0;
-            let mut digits = 0;
-            for &byte in after.iter().take_while(|b| b.is_ascii_digit()).take(9) {
-                level = level * 10 + (byte - b'0') as u32;
-                digits += 1;
-            }
-            if digits > 0 {
-                let rest = &after[digits..];
-                if rest.is_empty() || rest[0] == b' ' {
-                    return Some(SyntaxKind::Header(level));
-                }
-            }
-            None
-        }
-        b'-' => {
-            if len >= 3 && &text[start..line_end] == b"---" {
-                Some(SyntaxKind::ThematicBreak)
-            } else {
-                if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
-                    Some(SyntaxKind::ListItem)
-                } else {
-                    None
-                }
-            }
-        }
-        b'*' | b'+' => {
-            if len == 1 && start + 1 < text.len() && text[start + 1] == b' ' {
-                Some(SyntaxKind::ListItem)
-            } else {
-                None
-            }
-        }
-        b'|' => Some(SyntaxKind::TableRow),
-        _ => None,
+    end: usize,
+    text: &[u8],
+) {
+    if end < text.len() && text[end] == b' ' {
+        return;
     }
+    state.inline_stack.push((kind, start));
 }
 
 #[cfg(test)]
@@ -780,7 +840,7 @@ mod tests {
             ("#1 Заголовок", SyntaxKind::Header(1)),
             ("#:тег", SyntaxKind::Tag),
             ("- элемент", SyntaxKind::ListItem),
-            ("1. элемент", SyntaxKind::ListItem),
+            ("1; элемент", SyntaxKind::ListItem),
             ("> текст", SyntaxKind::Quote),
             ("---", SyntaxKind::ThematicBreak),
             ("| cell | cell |", SyntaxKind::TableRow),
@@ -790,6 +850,69 @@ mod tests {
             assert!(
                 spans.iter().any(|span| span.kind == *expected),
                 "текст: {text}, спаны: {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_level_bounds() {
+        // Уровень заголовка — u8: максимум 3 цифры, ≤ 255.
+        let cases: &[(&str, u8)] = &[
+            ("#1 Заголовок", 1),
+            ("#12 Заголовок", 12),
+            ("#255 Заголовок", 255),
+        ];
+        for (text, expected) in cases {
+            let spans = parse_spans(text);
+            assert_eq!(spans.len(), 1, "текст: {text}");
+            assert_eq!(
+                spans[0].kind,
+                SyntaxKind::Header(*expected),
+                "текст: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_level_out_of_bounds_not_header() {
+        // Больше 3 цифр или > 255 — не заголовок.
+        let cases = [
+            "#256 Заголовок",
+            "#1234 Заголовок",
+            "#abc Заголовок",
+            "#1a Заголовок",
+        ];
+        for text in cases {
+            let spans = parse_spans(text);
+            assert!(
+                spans.iter().all(|span| span.kind != SyntaxKind::Header(0)),
+                "текст: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn semicolon_list_any_number() {
+        // `N; ` — любое число цифр от начала строки.
+        let cases = ["1; элемент", "42; элемент", "123456789; элемент"];
+        for text in cases {
+            let spans = parse_spans(text);
+            assert!(
+                spans.iter().any(|span| span.kind == SyntaxKind::ListItem),
+                "текст: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn semicolon_not_list() {
+        // Без пробела после `;` — не список.
+        let cases = ["1;элемент", "a; элемент", "; элемент"];
+        for text in cases {
+            let spans = parse_spans(text);
+            assert!(
+                spans.iter().all(|span| span.kind != SyntaxKind::ListItem),
+                "текст: {text}"
             );
         }
     }

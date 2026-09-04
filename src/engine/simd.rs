@@ -84,8 +84,8 @@ fn build_tables(targets: &[u8]) -> Option<([u8; 16], [u8; 16])> {
     }
     // BIT[n] = 1 << n. Нужны только n 0..8 (старшие нибблы целей < 8).
     let mut bit = [0u8; 16];
-    for i in 0..8 {
-        bit[i] = 1 << i;
+    for (i, slot) in bit.iter_mut().enumerate().take(8) {
+        *slot = 1 << i;
     }
     Some((e, bit))
 }

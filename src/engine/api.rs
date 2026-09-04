@@ -47,7 +47,7 @@ pub trait SpanSink {
     fn on_spoiler_inline(&mut self, start: usize, end: usize);
     fn on_code_inline(&mut self, start: usize, end: usize);
     // ─── Line ───
-    fn on_header(&mut self, start: usize, end: usize, level: u32);
+    fn on_header(&mut self, start: usize, end: usize, level: u8);
     fn on_tag(&mut self, start: usize, end: usize);
     fn on_quote(&mut self, start: usize, end: usize);
     fn on_list_item(&mut self, start: usize, end: usize);
@@ -70,8 +70,10 @@ pub trait SpanSink {
 // Отдаёт один спан по ручке: match по своему enum (джамп-таблица),
 // редактор получает уже типизированный вызов. Общий код для стрима
 // (спаны уходят по мере создания) и батча (все разом после парсинга).
+// Generic: мономорфизация убирает виртуальный вызов (dyn) из горячего
+// пути — каждый спан идёт напрямую в конкретную реализацию.
 #[inline]
-pub(crate) fn dispatch_span(sink: &mut dyn SpanSink, span: SyntaxSpan) {
+pub(crate) fn dispatch_span<S: SpanSink + ?Sized>(sink: &mut S, span: SyntaxSpan) {
     match span.kind {
         SyntaxKind::Bold => sink.on_bold(span.start, span.end),
         SyntaxKind::Italic => sink.on_italic(span.start, span.end),
@@ -109,7 +111,7 @@ pub(crate) fn dispatch_span(sink: &mut dyn SpanSink, span: SyntaxSpan) {
 // Батч-режим: спаны уже готовы (движок разобрал документ целиком),
 // отдаются все разом. Стрим-режим — `parse_into`/`reparse_into`:
 // те же вызовы, но по мере готовности.
-pub fn dispatch_spans(sink: &mut dyn SpanSink, revision: u64, spans: &[SyntaxSpan]) {
+pub fn dispatch_spans<S: SpanSink>(sink: &mut S, revision: u64, spans: &[SyntaxSpan]) {
     sink.begin_revision(revision);
     for span in spans {
         dispatch_span(sink, *span);
@@ -159,7 +161,7 @@ impl EngineHandle {
     //
     // Редактор сам применил правку к своему буферу и отдаёт результат.
     // Fire-and-forget: результат уходит в sink, движок не ждёт ответа.
-    pub fn reparse(&mut self, text: &[u8], sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
+    pub fn reparse<S: SpanSink>(&mut self, text: &[u8], sink: &mut S) -> &[SyntaxSpan] {
         self.engine.reparse_into(text, sink)
     }
 }
@@ -270,7 +272,7 @@ mod tests {
                 kind: SyntaxKind::CodeInline,
             });
         }
-        fn on_header(&mut self, start: usize, end: usize, level: u32) {
+        fn on_header(&mut self, start: usize, end: usize, level: u8) {
             self.batches.last_mut().unwrap().1.push(SyntaxSpan {
                 start,
                 end,

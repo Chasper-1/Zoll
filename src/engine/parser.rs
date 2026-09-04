@@ -23,8 +23,26 @@ use crate::engine::line_map::LineMap;
 use crate::engine::resolver::{ResolveState, SyntaxSpan, process_marker};
 use crate::engine::simd::scan;
 
-// Набор интересующих байтов: синтаксические + структурный `\n`.
-pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|:.)}@`\n";
+// Набор интересующих байтов: только синтаксические маркеры. `\n` не нужен:
+// конец строки определяется по карте строк (этап 1) — одно сравнение
+// вместо события в цикле. `:` и `.` не маркеры — в скане не участвуют.
+pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|;)}@`";
+
+// Категории байтов для проверок в горячем цикле: вместо `is_ascii_digit()`
+// и `if byte == ...` — один индекс в таблицу (256 байт, L1).
+pub(crate) const CAT_DIGIT: u8 = 1;
+pub(crate) const CAT_OTHER: u8 = 0;
+
+// Таблица категорий: 1 — цифра, 0 — всё остальное.
+pub(crate) const CATEGORY: [u8; 256] = {
+    let mut table = [CAT_OTHER; 256];
+    let mut i = b'0' as usize;
+    while i <= b'9' as usize {
+        table[i] = CAT_DIGIT;
+        i += 1;
+    }
+    table
+};
 
 // Движок парсера.
 //
@@ -140,10 +158,14 @@ pub(crate) fn parse_document_into(
     state.sink = sink;
     state.line_end = newline_positions.first().copied().unwrap_or(text.len());
     let mut line_index = 0usize;
+    // Локальная копия границы строки: проверка в регистре, без загрузки
+    // поля и bounds check на каждое событие.
+    let mut line_end = state.line_end;
 
     // Текущий маркер: run подряд идущих одинаковых байтов.
     let mut marker_byte: u8 = 0;
     let mut marker_start: usize = 0;
+    let mut marker_end: usize = 0;
     let mut marker_len: usize = 0;
 
     scan(text, INTERESTING_BYTES, |offset, mask| {
@@ -154,39 +176,50 @@ pub(crate) fn parse_document_into(
             let byte = text[pos];
             remaining &= remaining - 1;
 
-            // Продолжение текущего маркера.
-            if byte == marker_byte && pos == marker_start + marker_len {
+            // Продолжение текущего маркера: следующий байт run'а.
+            // Сначала сравнение позиций (дешёвое), байт — только при
+            // совпадении: продолжения — меньшинство событий.
+            if pos == marker_end && byte == marker_byte {
                 marker_len += 1;
+                marker_end += 1;
                 continue;
             }
             // Завершаем предыдущий маркер и разбираем его.
             if marker_len > 0 {
                 process_marker(&mut state, marker_byte, marker_start, marker_len);
-                marker_len = 0;
             }
-            if byte == b'\n' {
-                // Строка кончилась: line-close без `}` — спан до конца
-                // строки (позиция `\n`), рождается здесь, уже финальный.
-                if let Some((kind, open_position)) = state.pending_line_close.take() {
-                    state.emit(SyntaxSpan {
-                        start: open_position,
-                        end: pos,
-                        kind,
-                    });
+            marker_byte = byte;
+            marker_start = pos;
+            marker_end = pos + 1;
+            marker_len = 1;
+
+            // Строка кончилась (позиция за картой `\n`): line-close без
+            // `}` — спан до конца строки, рождается здесь, уже финальный.
+            // Проверка по карте строк вместо `\n`-события в скане: `\n`
+            // убран из INTERESTING_BYTES, конец строки — одно сравнение.
+            // После завершения маркера: inline старой строки успевает
+            // попасть в стек до его сброса.
+            if pos > line_end {
+                while line_index < newline_positions.len() && pos > newline_positions[line_index]
+                {
+                    if let Some((kind, open_position)) = state.pending_line_close.take() {
+                        state.emit(SyntaxSpan {
+                            start: open_position,
+                            end: newline_positions[line_index],
+                            kind,
+                        });
+                    }
+                    // Следующая строка — из готовой карты.
+                    line_index += 1;
+                    state.line_start = newline_positions[line_index - 1] + 1;
+                    line_end = newline_positions
+                        .get(line_index)
+                        .copied()
+                        .unwrap_or(text.len());
+                    state.line_end = line_end;
+                    // Inline не выходит за строку — сбрасываем.
+                    state.inline_stack.clear();
                 }
-                // Следующая строка — из готовой карты.
-                line_index += 1;
-                state.line_start = pos + 1;
-                state.line_end = newline_positions
-                    .get(line_index)
-                    .copied()
-                    .unwrap_or(text.len());
-                // Inline не выходит за строку — сбрасываем.
-                state.inline_stack.clear();
-            } else {
-                marker_byte = byte;
-                marker_start = pos;
-                marker_len = 1;
             }
         }
     });
@@ -245,6 +278,28 @@ mod tests {
     fn dependencies_tracked() {
         let engine = Engine::parse(b"**a)) **b))");
         assert_eq!(engine.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn marker_across_block_boundary() {
+        // Маркер, пересекающий границу 32-байтного блока скана:
+        // `**` на позициях 31-32, `))` на 37-38.
+        let text = format!("{}**bold))", "a".repeat(31));
+        let engine = Engine::parse(text.as_bytes());
+        assert_eq!(engine.spans().len(), 1);
+        assert_eq!(engine.spans()[0].kind, SyntaxKind::Bold);
+        assert_eq!((engine.spans()[0].start, engine.spans()[0].end), (31, 39));
+    }
+
+    #[test]
+    fn triple_marker_across_block_boundary() {
+        // `%%%` на позициях 31-33 (в начале строки): run через границу
+        // блока, закрытие `}` в начале следующей строки.
+        let text = format!("{}\n%%%блок\n}}", "a".repeat(30));
+        let engine = Engine::parse(text.as_bytes());
+        assert_eq!(engine.spans().len(), 1);
+        assert_eq!(engine.spans()[0].kind, SyntaxKind::CommentBlock);
+        assert_eq!((engine.spans()[0].start, engine.spans()[0].end), (31, 44));
     }
 
     #[test]
