@@ -118,7 +118,9 @@ impl Engine {
 
     // Разобрать документ и сразу разослать спаны по ручке (fire-and-forget).
     // Спаны уходят по мере готовности: каждый — в момент создания.
-    pub fn parse_into(text: &[u8], sink: &mut dyn SpanSink) -> Self {
+    // Generic: компилятор мономорфизирует dispatch_span для конкретного
+    // типа sink, убирая vtable-диспетчеризацию из горячего пути.
+    pub fn parse_into<S: SpanSink + ?Sized>(text: &[u8], sink: &mut S) -> Self {
         sink.begin_revision(0);
         let (newline_positions, spans) = parse_document_into(text, Some(sink));
         sink.end_revision();
@@ -144,7 +146,11 @@ impl Engine {
     }
 
     // Пересобрать и сразу разослать спаны по ручке (стрим, fire-and-forget).
-    pub fn reparse_into(&mut self, text: &[u8], sink: &mut dyn SpanSink) -> &[SyntaxSpan] {
+    pub fn reparse_into<S: SpanSink + ?Sized>(
+        &mut self,
+        text: &[u8],
+        sink: &mut S,
+    ) -> &[SyntaxSpan] {
         self.revision += 1;
         sink.begin_revision(self.revision);
         let (newline_positions, spans) = parse_document_into(text, Some(sink));
@@ -175,15 +181,54 @@ impl Engine {
 // карты, поэтому line-маркерам не нужно ничего искать.
 //
 // Возвращает `(позиции \n, синтаксические диапазоны)`.
-pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
-    parse_document_into(text, None)
+// Маркерный тип для batch-режима: sink не используется, нужен только
+// для вывода типа S в parse_document_into. Компилятор удаляет весь
+// код NoSink, т.к. sink = None и методы не вызываются.
+struct NoSink;
+
+impl SpanSink for NoSink {
+    fn begin_revision(&mut self, _: u64) {}
+    fn on_bold(&mut self, _: usize, _: usize) {}
+    fn on_italic(&mut self, _: usize, _: usize) {}
+    fn on_underline(&mut self, _: usize, _: usize) {}
+    fn on_strikethrough(&mut self, _: usize, _: usize) {}
+    fn on_highlight(&mut self, _: usize, _: usize) {}
+    fn on_insertion(&mut self, _: usize, _: usize) {}
+    fn on_deletion(&mut self, _: usize, _: usize) {}
+    fn on_superscript(&mut self, _: usize, _: usize) {}
+    fn on_subscript(&mut self, _: usize, _: usize) {}
+    fn on_formula_inline(&mut self, _: usize, _: usize) {}
+    fn on_comment_inline(&mut self, _: usize, _: usize) {}
+    fn on_spoiler_inline(&mut self, _: usize, _: usize) {}
+    fn on_code_inline(&mut self, _: usize, _: usize) {}
+    fn on_header(&mut self, _: usize, _: usize, _: u8) {}
+    fn on_tag(&mut self, _: usize, _: usize) {}
+    fn on_quote(&mut self, _: usize, _: usize) {}
+    fn on_list_item(&mut self, _: usize, _: usize) {}
+    fn on_table_row(&mut self, _: usize, _: usize) {}
+    fn on_thematic_break(&mut self, _: usize, _: usize) {}
+    fn on_formula_line(&mut self, _: usize, _: usize) {}
+    fn on_comment_line(&mut self, _: usize, _: usize) {}
+    fn on_spoiler_line(&mut self, _: usize, _: usize) {}
+    fn on_code_line(&mut self, _: usize, _: usize) {}
+    fn on_formula_block(&mut self, _: usize, _: usize) {}
+    fn on_comment_block(&mut self, _: usize, _: usize) {}
+    fn on_spoiler_block(&mut self, _: usize, _: usize) {}
+    fn on_code_block(&mut self, _: usize, _: usize) {}
+    fn on_metadata(&mut self, _: usize, _: usize) {}
+    fn end_revision(&mut self) {}
 }
 
+pub(crate) fn parse_document(text: &[u8]) -> (Vec<usize>, Vec<SyntaxSpan>) {
+    parse_document_into::<NoSink>(text, None)
+}
 // То же, но с синком: каждый спан отдаётся сразу в момент создания.
 // begin_revision/end_revision — обязанность вызывающего (нужен номер версии).
-pub(crate) fn parse_document_into(
+// Generic: компилятор мономорфизирует для конкретного типа sink (или
+// использует din-путь для dyn SpanSink), убирая виртуальные вызовы.
+pub(crate) fn parse_document_into<S: SpanSink + ?Sized>(
     text: &[u8],
-    sink: Option<&mut dyn SpanSink>,
+    sink: Option<&mut S>,
 ) -> (Vec<usize>, Vec<SyntaxSpan>) {
     // ─── Этап 1: регистры SIMD → готовые строки ───
     // Сразу с запасом: 1/16 документа (средняя строка ~30-80 байт) —
