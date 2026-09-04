@@ -28,6 +28,51 @@ use crate::engine::simd::scan;
 // вместо события в цикле. `:` и `.` не маркеры — в скане не участвуют.
 pub const INTERESTING_BYTES: &[u8] = b"*/_~=+-',$%!#>|;)}@`";
 
+// Накопитель маркерного run'а: объединяет подряд идущие одинаковые байты
+// в один маркер. SIMD-скан отдаёт одиночные байты; склейка — задача
+// этого слоя. Извлекает байт и позицию из mask-события scan().
+struct MarkerAccumulator {
+    byte: u8,
+    start: usize,
+    end: usize,
+    len: usize,
+}
+
+impl MarkerAccumulator {
+    fn new() -> Self {
+        MarkerAccumulator {
+            byte: 0,
+            start: 0,
+            end: 0,
+            len: 0,
+        }
+    }
+
+    // Пробует добавить байт в текущий run.
+    // Возвращает `true` если run продолжается (байт == предыдущий и позиция
+    // смежная), `false` если run оборван — вызывающий должен завершить
+    // предыдущий маркер и начать новый через `start_new`.
+    #[inline(always)]
+    fn push(&mut self, byte: u8, pos: usize) -> bool {
+        if pos == self.end && byte == self.byte {
+            self.len += 1;
+            self.end += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    // Начинает новый маркерный run.
+    #[inline(always)]
+    fn start_new(&mut self, byte: u8, pos: usize) {
+        self.byte = byte;
+        self.start = pos;
+        self.end = pos + 1;
+        self.len = 1;
+    }
+}
+
 // Категории байтов для проверок в горячем цикле: вместо `is_ascii_digit()`
 // и `if byte == ...` — один индекс в таблицу (256 байт, L1).
 pub(crate) const CAT_DIGIT: u8 = 1;
@@ -162,11 +207,7 @@ pub(crate) fn parse_document_into(
     // поля и bounds check на каждое событие.
     let mut line_end = state.line_end;
 
-    // Текущий маркер: run подряд идущих одинаковых байтов.
-    let mut marker_byte: u8 = 0;
-    let mut marker_start: usize = 0;
-    let mut marker_end: usize = 0;
-    let mut marker_len: usize = 0;
+    let mut marker = MarkerAccumulator::new();
 
     scan(text, INTERESTING_BYTES, |offset, mask| {
         let mut remaining = mask;
@@ -176,22 +217,15 @@ pub(crate) fn parse_document_into(
             let byte = text[pos];
             remaining &= remaining - 1;
 
-            // Продолжение текущего маркера: следующий байт run'а.
-            // Сначала сравнение позиций (дешёвое), байт — только при
-            // совпадении: продолжения — меньшинство событий.
-            if pos == marker_end && byte == marker_byte {
-                marker_len += 1;
-                marker_end += 1;
-                continue;
+            // Продолжение текущего маркерного run'а или завершение
+            // предыдущего + начало нового.
+            if !marker.push(byte, pos) {
+                // Завершаем предыдущий маркер и разбираем его.
+                if marker.len > 0 {
+                    process_marker(&mut state, marker.byte, marker.start, marker.len);
+                }
+                marker.start_new(byte, pos);
             }
-            // Завершаем предыдущий маркер и разбираем его.
-            if marker_len > 0 {
-                process_marker(&mut state, marker_byte, marker_start, marker_len);
-            }
-            marker_byte = byte;
-            marker_start = pos;
-            marker_end = pos + 1;
-            marker_len = 1;
 
             // Строка кончилась (позиция за картой `\n`): line-close без
             // `}` — спан до конца строки, рождается здесь, уже финальный.
@@ -200,8 +234,7 @@ pub(crate) fn parse_document_into(
             // После завершения маркера: inline старой строки успевает
             // попасть в стек до его сброса.
             if pos > line_end {
-                while line_index < newline_positions.len() && pos > newline_positions[line_index]
-                {
+                while line_index < newline_positions.len() && pos > newline_positions[line_index] {
                     if let Some((kind, open_position)) = state.pending_line_close.take() {
                         state.emit(SyntaxSpan {
                             start: open_position,
@@ -224,8 +257,8 @@ pub(crate) fn parse_document_into(
         }
     });
     // Последний маркер документа.
-    if marker_len > 0 {
-        process_marker(&mut state, marker_byte, marker_start, marker_len);
+    if marker.len > 0 {
+        process_marker(&mut state, marker.byte, marker.start, marker.len);
     }
     // Последняя строка: line-close без `}` — спан до конца документа.
     if let Some((kind, open_position)) = state.pending_line_close.take() {
@@ -308,5 +341,132 @@ mod tests {
         let engine = Engine::parse(b"a\nb\nc");
         assert_eq!(engine.line_map.num_lines(), 3);
         assert_eq!(engine.line_map.newline_positions, vec![1, 3]);
+    }
+
+    // ─── Edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn many_markers_on_one_line() {
+        // Длинная строка с >100 inline-маркерами.
+        let mut text = String::new();
+        for _ in 0..150 {
+            text.push_str("**жирный)) ");
+        }
+        let engine = Engine::parse(text.as_bytes());
+        assert_eq!(engine.spans().len(), 150);
+        assert!(engine.spans().iter().all(|s| s.kind == SyntaxKind::Bold));
+    }
+
+    #[test]
+    fn document_entirely_markers() {
+        // Документ без обычного текста: только маркеры и закрытия.
+        let text = "**bold)) //italic))\n$$formula}\n%%comment}\n---\n";
+        let engine = Engine::parse(text.as_bytes());
+        let kinds: Vec<SyntaxKind> = engine.spans().iter().map(|s| s.kind).collect();
+        assert!(kinds.contains(&SyntaxKind::Bold));
+        assert!(kinds.contains(&SyntaxKind::Italic));
+        assert!(kinds.contains(&SyntaxKind::FormulaLine));
+        assert!(kinds.contains(&SyntaxKind::CommentLine));
+        assert!(kinds.contains(&SyntaxKind::ThematicBreak));
+    }
+
+    #[test]
+    fn empty_document_parse_into() {
+        // Пустой документ через стрим — без спанов.
+        use crate::engine::api::SpanSink;
+        struct Empty;
+        impl SpanSink for Empty {
+            fn begin_revision(&mut self, _: u64) {}
+            fn on_bold(&mut self, _: usize, _: usize) {}
+            fn on_italic(&mut self, _: usize, _: usize) {}
+            fn on_underline(&mut self, _: usize, _: usize) {}
+            fn on_strikethrough(&mut self, _: usize, _: usize) {}
+            fn on_highlight(&mut self, _: usize, _: usize) {}
+            fn on_insertion(&mut self, _: usize, _: usize) {}
+            fn on_deletion(&mut self, _: usize, _: usize) {}
+            fn on_superscript(&mut self, _: usize, _: usize) {}
+            fn on_subscript(&mut self, _: usize, _: usize) {}
+            fn on_formula_inline(&mut self, _: usize, _: usize) {}
+            fn on_comment_inline(&mut self, _: usize, _: usize) {}
+            fn on_spoiler_inline(&mut self, _: usize, _: usize) {}
+            fn on_code_inline(&mut self, _: usize, _: usize) {}
+            fn on_header(&mut self, _: usize, _: usize, _: u8) {}
+            fn on_tag(&mut self, _: usize, _: usize) {}
+            fn on_quote(&mut self, _: usize, _: usize) {}
+            fn on_list_item(&mut self, _: usize, _: usize) {}
+            fn on_table_row(&mut self, _: usize, _: usize) {}
+            fn on_thematic_break(&mut self, _: usize, _: usize) {}
+            fn on_formula_line(&mut self, _: usize, _: usize) {}
+            fn on_comment_line(&mut self, _: usize, _: usize) {}
+            fn on_spoiler_line(&mut self, _: usize, _: usize) {}
+            fn on_code_line(&mut self, _: usize, _: usize) {}
+            fn on_formula_block(&mut self, _: usize, _: usize) {}
+            fn on_comment_block(&mut self, _: usize, _: usize) {}
+            fn on_spoiler_block(&mut self, _: usize, _: usize) {}
+            fn on_code_block(&mut self, _: usize, _: usize) {}
+            fn on_metadata(&mut self, _: usize, _: usize) {}
+            fn end_revision(&mut self) {}
+        }
+        let mut sink = Empty;
+        let engine = Engine::parse_into(b"", &mut sink);
+        assert_eq!(engine.spans().len(), 0);
+    }
+
+    #[test]
+    fn stream_span_order_at_block_boundaries() {
+        // Стрим: блочный %%% закрывается после line-level %% внутри него.
+        use crate::engine::api::SpanSink;
+        struct Collector {
+            kinds: Vec<SyntaxKind>,
+        }
+        impl Collector {
+            fn new() -> Self {
+                Collector { kinds: Vec::new() }
+            }
+        }
+        impl SpanSink for Collector {
+            fn begin_revision(&mut self, _: u64) {}
+            fn on_bold(&mut self, _: usize, _: usize) {}
+            fn on_italic(&mut self, _: usize, _: usize) {}
+            fn on_underline(&mut self, _: usize, _: usize) {}
+            fn on_strikethrough(&mut self, _: usize, _: usize) {}
+            fn on_highlight(&mut self, _: usize, _: usize) {}
+            fn on_insertion(&mut self, _: usize, _: usize) {}
+            fn on_deletion(&mut self, _: usize, _: usize) {}
+            fn on_superscript(&mut self, _: usize, _: usize) {}
+            fn on_subscript(&mut self, _: usize, _: usize) {}
+            fn on_formula_inline(&mut self, _: usize, _: usize) {}
+            fn on_comment_inline(&mut self, _: usize, _: usize) {}
+            fn on_spoiler_inline(&mut self, _: usize, _: usize) {}
+            fn on_code_inline(&mut self, _: usize, _: usize) {}
+            fn on_header(&mut self, _: usize, _: usize, _: u8) {}
+            fn on_tag(&mut self, _: usize, _: usize) {}
+            fn on_quote(&mut self, _: usize, _: usize) {}
+            fn on_list_item(&mut self, _: usize, _: usize) {}
+            fn on_table_row(&mut self, _: usize, _: usize) {}
+            fn on_thematic_break(&mut self, _: usize, _: usize) {}
+            fn on_formula_line(&mut self, _: usize, _: usize) {}
+            fn on_comment_line(&mut self, _: usize, _: usize) {
+                self.kinds.push(SyntaxKind::CommentLine);
+            }
+            fn on_spoiler_line(&mut self, _: usize, _: usize) {}
+            fn on_code_line(&mut self, _: usize, _: usize) {}
+            fn on_formula_block(&mut self, _: usize, _: usize) {}
+            fn on_comment_block(&mut self, _: usize, _: usize) {
+                self.kinds.push(SyntaxKind::CommentBlock);
+            }
+            fn on_spoiler_block(&mut self, _: usize, _: usize) {}
+            fn on_code_block(&mut self, _: usize, _: usize) {}
+            fn on_metadata(&mut self, _: usize, _: usize) {}
+            fn end_revision(&mut self) {}
+        }
+        let mut sink = Collector::new();
+        Engine::parse_into("%%%\n%%скрыто}\n}".as_bytes(), &mut sink);
+        // CommentLine приходит раньше CommentBlock (line-close внутри блока
+        // закрывается своей `}` раньше, чем блок закроется своей `}`).
+        assert_eq!(
+            sink.kinds,
+            vec![SyntaxKind::CommentLine, SyntaxKind::CommentBlock]
+        );
     }
 }

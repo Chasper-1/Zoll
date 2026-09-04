@@ -410,12 +410,12 @@ fn open_marker<S: SpanSink + ?Sized>(
         | (b'\'', 2)
         | (b',', 2) => {
             if let Some(kind) = INLINE2[byte as usize] {
-                push_inline(state, kind, start, end, text);
+                push_inline(state, kind, start, end);
             }
         }
         (b'$', 1) | (b'%', 1) | (b'!', 1) | (b'`', 1) => {
             if let Some(kind) = INLINE1[byte as usize] {
-                push_inline(state, kind, start, end, text);
+                push_inline(state, kind, start, end);
             }
         }
         _ => {}
@@ -430,9 +430,8 @@ fn push_inline<S: SpanSink + ?Sized>(
     kind: SyntaxKind,
     start: usize,
     end: usize,
-    text: &[u8],
 ) {
-    if end < text.len() && text[end] == b' ' {
+    if end < state.text.len() && state.text[end] == b' ' {
         return;
     }
     state.inline_stack.push((kind, start));

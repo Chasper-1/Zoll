@@ -16,6 +16,12 @@ impl LineMap {
     }
 
     // Номер строки (0-based), содержащей байт `byte`.
+    //
+    // `binary_search` возвращает `Ok(index)` если `byte` — позиция `\n`.
+    // Это корректно: `\n` принадлежит предыдущей строке (строка заканчивается
+    // ПЕРЕД `\n`), поэтому `index` (= номер `\n`) = номер следующей строки
+    // после завершённой. Совпадает с `Err(index)`: байт после `\n` — первая
+    // позиция следующей строки, `index` — количество `\n` до него.
     pub fn line_at(&self, byte: usize) -> usize {
         match self.newline_positions.binary_search(&byte) {
             Ok(index) => index,

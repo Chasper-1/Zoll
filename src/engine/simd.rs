@@ -395,16 +395,24 @@ unsafe fn scan_neon<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit:
 }
 
 // Скалярный фолбэк (не-x86 или без SIMD): блоки по 16 байт.
+//
+// Вместо O(n) `targets.contains()` на каждый байт — O(1) загрузка из
+// lookup-таблицы 256 байт (одна кэш-линия, L1 всегда). Таблица
+// строится один раз на входе `scan()`.
 fn scan_scalar<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit: F) {
+    // Lookup-таблица: lookup[byte] = 1 если byte — цель.
+    let mut lookup = [0u8; 256];
+    for &t in targets {
+        lookup[t as usize] = 1;
+    }
+
     let len = text.len();
     let mut offset = 0;
 
     while offset + 16 <= len {
         let mut mask = 0u32;
         for rel in 0..16 {
-            if targets.contains(&text[offset + rel]) {
-                mask |= 1 << rel;
-            }
+            mask |= (lookup[text[offset + rel] as usize] as u32) << rel;
         }
         if mask != 0 {
             emit(offset, mask);
@@ -414,9 +422,7 @@ fn scan_scalar<F: FnMut(usize, u32)>(text: &[u8], targets: &[u8], mut emit: F) {
 
     let mut remainder_mask = 0u32;
     for (rel, &byte) in text[offset..].iter().enumerate() {
-        if targets.contains(&byte) {
-            remainder_mask |= 1 << rel;
-        }
+        remainder_mask |= (lookup[byte as usize] as u32) << rel;
     }
     if remainder_mask != 0 {
         emit(offset, remainder_mask);
