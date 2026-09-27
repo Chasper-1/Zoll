@@ -2,10 +2,16 @@
 //!
 //! | Группа | Что меряет | zoll | pulldown-cmark | sparkdown | ferromark |
 //! |--------|-----------|:----:|:--------------:|:---------:|:---------:|
-//! | `parse_spans` | Парсинг → плоский список | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> | — | ✅ Vec<BlockEvent> |
-//! | `html_render` | Парсинг + рендер в HTML | — | ✅ | ✅ | ✅ |
+//! | `parse_spans` | Файл → структура, готовая к рендеру | ✅ Vec<SyntaxSpan> | ✅ Vec<Event> | — | ✅ Vec<BlockEvent> + Vec<InlineEvent> |
+//! | `html_render` | Файл → HTML (финальный формат) | — | ✅ | ✅ | ✅ |
 //! | `zoll_breakdown` | scan (маски) vs полный проход (батч и стрим) | ✅ | — | — | — |
 //! | `full_markup` | Полная палитра конструкций (вкл. блочные), батч и стрим | ✅ | ✅ | — | ✅ |
+//!
+//! Правило сравнения: каждый парсер обязан отдать **всё, что нужно рендереру**.
+//! Недопарсенный результат в сравнение не берётся — это занижает конкурента,
+//! а не показывает преимущество. Поэтому ferromark здесь гоняется полностью:
+//! блоки → `take_link_refs` → `fixup_list_tight` → инлайн по текстовым
+//! диапазонам, ровно как в его собственном рендерере, но без самого рендера.
 //!
 //! Стрим-варианты (`*_stream`, `*_stream_ttfs`) живут в тех же группах,
 //! что и батч, на том же документе: `*_stream` — полное время парсинга
@@ -13,9 +19,10 @@
 //! первого спана (time-to-first-span).
 //!
 //! sparkdown (0.1.0) — HTML-only (scaffold, только абзацы), поэтому только
-//! в `html_render`. ferromark — стриминг событий без HTML (BlockParser),
-//! поэтому и в `parse_spans`, и в `html_render`. Оба парсят тот же `md_doc`,
-//! что и pulldown-cmark.
+//! в `html_render`. ferromark — публичный API полного разбора: `BlockParser`
+//! (блоки) + `InlineParser` (инлайн) + `fixup_list_tight`; HTML отдельной
+//! функцией, поэтому и в `parse_spans`, и в `html_render`. Оба парсят тот
+//! же `md_doc`, что и pulldown-cmark.
 //!
 //! Запуск:
 //!   cargo bench --bench compare
@@ -26,6 +33,89 @@ use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_mai
 use std::time::{Duration, Instant};
 
 use zoll::engine::{Engine, INTERESTING_BYTES, SpanSink, dispatch_spans, scan};
+
+// ─── 0. Полный разбор ferromark и его конфигурация ─────────────
+//
+// `Options::commonmark()` выключает tables/strikethrough/highlight/math —
+// то есть ровно те конструкции, которые есть в тестовом документе. С такой
+// конфигурацией ferromark сканирует текст, не видя в нём разметки, и
+// выигрывает нечестно. Поэтому конфигурация собирается явно: GFM (таблицы,
+// зачёркивание, таски, автоссылки) + highlight + math.
+//
+// `disallowed_raw_html: false` — в тестовом документе `<u>`, `<ins>`, `<del>`,
+// `<sup>`, `<sub>` это осмысленная разметка, и pulldown-cmark их тоже не
+// фильтрует. GFM-фильтр запрещённого raw HTML выключен, чтобы обе стороны
+// читали один и тот же смысл.
+fn ferromark_options() -> ferromark::Options {
+    ferromark::Options {
+        render_policy: ferromark::RenderPolicy::Trusted,
+        disallowed_raw_html: false,
+        highlight: true,
+        math: true,
+        ..ferromark::Options::gfm()
+    }
+}
+
+// Полный путь «файл → структура, готовая к рендеру», без рендера.
+// Построчно повторяет `ferromark::render_to_writer_impl` (lib.rs), из
+// которого убран только вызов рендера:
+//
+//   1. `BlockParser::parse` — блок-структура в `Vec<BlockEvent>`;
+//   2. `take_link_refs` — ссылки нужно инлайну для резолва;
+//   3. `fixup_list_tight` — без него у `ListStart` неизвестен tight/loose
+//      (значение приходит из `ListEnd`), т.е. список событий неполон;
+//   4. `InlineParser::parse_with_options` по каждому `BlockEvent::Text`
+//      — так же, как в рендерере: `Code` и `HtmlBlockText` инлайн не
+//      разбираются, а `Text` покрывает абзацы, заголовки и ячейки таблиц.
+//
+// Буфер инлайн-событий переиспользуется с `clear()`, как в самом рендерере.
+// Собирать все события в один плоский список нельзя: ferromark отдаёт их
+// по диапазонам, и общий список потребовал бы копирования, которого в
+// реальном рендере не происходит. То есть мерится ровно работа парсинга.
+//
+// Известная асимметрия готовности: `InlineEvent` несёт диапазоны
+// относительно среза (рендерер сам прибавляет начало блока), тогда как
+// спаны zoll — абсолютные байты документа. Работа одинаковая, структура
+// «готовности» разная; на измерение это не влияет.
+fn ferromark_full_parse(input: &[u8], opts: &ferromark::Options) {
+    let mut parser = ferromark::block::BlockParser::new_with_options(input, opts.clone());
+    let mut blocks: Vec<ferromark::block::BlockEvent> =
+        Vec::with_capacity((input.len() / 16).max(64));
+    parser.parse(&mut blocks);
+    let link_refs = parser.take_link_refs();
+    ferromark::fixup_list_tight(&mut blocks);
+
+    let mut inline_parser = ferromark::inline::InlineParser::new();
+    let mut events: Vec<ferromark::inline::InlineEvent> =
+        Vec::with_capacity((input.len() / 8).max(8));
+    let refs = opts.allow_link_refs.then_some(&link_refs);
+    let mut total = 0usize;
+
+    for event in &blocks {
+        if let ferromark::block::BlockEvent::Text(range) = event {
+            events.clear();
+            inline_parser.parse_with_options(
+                range.slice(input),
+                refs,
+                opts.allow_html,
+                opts.strikethrough,
+                opts.highlight,
+                opts.superscript,
+                opts.subscript,
+                opts.autolink_literals,
+                opts.math,
+                false, // inline_footnotes
+                None,  // footnote_store
+                &mut events,
+            );
+            total += events.len();
+        }
+    }
+
+    // black_box по значению, не по длине: иначе компилятор вправе не
+    // материализовать содержимое событий.
+    black_box((blocks, total));
+}
 
 // ─── Генерация тестовых документов ────────────────────────────
 
@@ -235,17 +325,12 @@ fn bench_parse_spans(c: &mut Criterion) {
         });
     });
 
-    // ferromark: стриминг блочных событий без HTML (BlockParser → Vec<BlockEvent>).
-    // Options::commonmark() — синтаксис CommonMark; render_policy на парсинг не влияет.
-    group.bench_function("ferromark_block_events", |b| {
+    // ferromark: полный разбор — блоки + fixup + инлайн (см.
+    // ferromark_full_parse), результат готов к рендеру.
+    let ferromark_opts = ferromark_options();
+    group.bench_function("ferromark_full_parse", |b| {
         b.iter(|| {
-            let mut parser = ferromark::block::BlockParser::new_with_options(
-                black_box(md_doc.as_bytes()),
-                ferromark::Options::commonmark(),
-            );
-            let mut events: Vec<ferromark::block::BlockEvent> = Vec::new();
-            parser.parse(&mut events);
-            black_box(events);
+            ferromark_full_parse(black_box(md_doc.as_bytes()), &ferromark_opts);
         });
     });
 
@@ -281,12 +366,10 @@ fn bench_html_render(c: &mut Criterion) {
         });
     });
 
-    // ferromark: CommonMark-синтаксис, Trusted-рендер (raw HTML пропускается,
-    // как у pulldown; дефолтный Untrusted экранировал бы его — нечестно).
-    let ferromark_opts = ferromark::Options {
-        render_policy: ferromark::RenderPolicy::Trusted,
-        ..ferromark::Options::commonmark()
-    };
+    // ferromark: та же конфигурация, что и в parse_spans (GFM + highlight +
+    // math, Trusted без GFM-фильтра raw HTML), чтобы обе группы мерили
+    // одну и ту же грамматику.
+    let ferromark_opts = ferromark_options();
     group.bench_function("ferromark_html", |b| {
         b.iter(|| {
             let html = ferromark::to_html_with_options(black_box(&md_doc), &ferromark_opts);
@@ -391,15 +474,10 @@ fn bench_full_markup(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("ferromark_block_events", |b| {
+    let ferromark_opts = ferromark_options();
+    group.bench_function("ferromark_full_parse", |b| {
         b.iter(|| {
-            let mut parser = ferromark::block::BlockParser::new_with_options(
-                black_box(md_doc.as_bytes()),
-                ferromark::Options::commonmark(),
-            );
-            let mut events: Vec<ferromark::block::BlockEvent> = Vec::new();
-            parser.parse(&mut events);
-            black_box(events);
+            ferromark_full_parse(black_box(md_doc.as_bytes()), &ferromark_opts);
         });
     });
 
