@@ -1124,4 +1124,70 @@ mod tests {
         assert!(parse_spans("почта user@example.com").is_empty());
         assert!(parse_spans("@@@\nтекст\n}").is_empty());
     }
+
+    // ─── Примеры из документации ────────────────────────────────
+    //
+    // Строки продублированы из README.md и docs/syntax.md, чтобы опечатка
+    // в доке не разошлась с парсером: правило «без пробела после маркера»
+    // и «line только в начале строки» проверяются тут буквально.
+
+    #[test]
+    fn documented_inline_examples() {
+        for (text, kind) in [
+            ("**текст))", SyntaxKind::Bold),
+            ("//текст))", SyntaxKind::Italic),
+            ("__текст))", SyntaxKind::Underline),
+            ("~~текст))", SyntaxKind::Strikethrough),
+            ("==текст))", SyntaxKind::Highlight),
+            ("++текст))", SyntaxKind::Insertion),
+            ("--текст))", SyntaxKind::Deletion),
+            ("''текст))", SyntaxKind::Superscript),
+            (",,текст))", SyntaxKind::Subscript),
+            ("%комментарий))", SyntaxKind::CommentInline),
+            ("$x+y))", SyntaxKind::FormulaInline),
+            ("!скрыто))", SyntaxKind::SpoilerInline),
+            ("`код))", SyntaxKind::CodeInline),
+        ] {
+            let spans = parse_spans(text);
+            assert!(
+                spans.iter().any(|span| span.kind == kind),
+                "документированный пример `{text}` не даёт {kind:?}, разобрано {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_line_examples() {
+        for (text, kind) in [
+            ("%%комментарий}", SyntaxKind::CommentLine),
+            ("$$формула}", SyntaxKind::FormulaLine),
+            ("!!спойлер}", SyntaxKind::SpoilerLine),
+            ("> текст}", SyntaxKind::Quote),
+        ] {
+            let spans = parse_spans(text);
+            assert!(
+                spans.iter().any(|span| span.kind == kind),
+                "документированный пример `{text}` не даёт {kind:?}, разобрано {spans:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_line_examples_reject_violations() {
+        // Минус-примеры к тем же правилам: mid-line и пробел после маркера.
+        for text in [
+            "Текст %%комментарий}",
+            "Текст $$формула}",
+            "Текст !!спойлер}",
+            "%% скрыто}",
+            "$$ формула}",
+            "!! спойлер}",
+        ] {
+            let spans = parse_spans(text);
+            assert!(
+                spans.is_empty(),
+                "`{text}` должен игнорироваться, а разобран как {spans:?}"
+            );
+        }
+    }
 }
