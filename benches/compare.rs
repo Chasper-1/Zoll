@@ -16,6 +16,13 @@
 //! - у обоих конкурентов включены все расширения, которые они умеют
 //!   (`ferromark_options`, `pulldown_options`), причём так, чтобы они читали
 //!   разметку, а не текст: иначе сопоставимых конструкций просто не будет.
+//!   Исключение — расширения, которые не разбирают, а проглатывают документ
+//!   (метаданные `---`/`+++`): они дают конкуренту «победу» вообще без работы;
+//! - `check_documents` перед прогоном убеждается, что документы действительно
+//!   разобрались в структуру (таблицы, math, зачёркивание, разделители есть, а
+//!   сырой разметки в `Text` не осталось). Такое уже случалось: с
+//!   `Options::all()` строка `---` открывала блок YAML-метаданных и съедала
+//!   весь документ, а цифра выглядела как честный результат.
 //!
 //! Стрим-варианты (`*_stream`, `*_stream_ttfs`) живут в тех же группах,
 //! что и батч, на том же документе: `*_stream` — полное время парсинга
@@ -91,13 +98,40 @@ fn ferromark_options() -> ferromark::Options {
     }
 }
 
-// Все расширения pulldown-cmark: таблицы, сноски, зачёркивание, таски, смарт-
-// пунктуация, атрибуты заголовков, метаданные, math, GFM, списки определений,
-// верхний/нижний индекс, вики-ссылки. Флаги, для которых в документе нет
-// соответствующего синтаксиса, ничего не стоят — зато конкурент точно не
-// обвинён в том, что ему что-то недодали.
+// Все расширения pulldown-cmark, кроме двух, которые не разбирают документ, а
+// проглатывают его: таблицы, сноски, зачёркивание, таски, смарт-пунктуация,
+// атрибуты заголовков, math, GFM, списки определений, верхний/нижний индекс,
+// вики-ссылки. Флаги, для которых в документе нет синтаксиса, ничего не стоят —
+// зато конкурент точно не обвинён в том, что ему что-то недодали.
+//
+// Чего нет и почему:
+// - `ENABLE_YAML_STYLE_METADATA_BLOCKS` и `ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS`:
+//   строка `---` (или `+++`) в начале строки открывает блок метаданных, который
+//   ест всё до закрывающей строки, а если её нет — до конца файла
+//   (`pulldown-cmark/src/firstpass.rs`, `parse_block` → `scan_metadata_block`).
+//   Проверяется это **в любом месте документа**, а не только в начале, поэтому
+//   одна строка `---` посреди тела без парной `---` молча выкидывает 99%
+//   документа, и конкурент «выигрывает», ни разу не разобрав разметку. Ровно
+//   эта ошибка была с `Options::all()`; теперь `---` остаётся обычным
+//   разделителем, как и задумано. То же самое у ferromark делает
+//   `front_matter: false`.
+// - `ENABLE_OLD_FOOTNOTES`: константа составная — `(1 << 9) | (1 << 2)`, то есть
+//   вместе с ней выключается и `ENABLE_FOOTNOTES`, а `has_gfm_footnotes()`
+//   начинает врать про GFM-совместимость сносок.
 fn pulldown_options() -> pulldown_cmark::Options {
-    pulldown_cmark::Options::all()
+    use pulldown_cmark::Options as O;
+    O::ENABLE_TABLES
+        | O::ENABLE_FOOTNOTES
+        | O::ENABLE_STRIKETHROUGH
+        | O::ENABLE_TASKLISTS
+        | O::ENABLE_SMART_PUNCTUATION
+        | O::ENABLE_HEADING_ATTRIBUTES
+        | O::ENABLE_MATH
+        | O::ENABLE_GFM
+        | O::ENABLE_DEFINITION_LIST
+        | O::ENABLE_SUPERSCRIPT
+        | O::ENABLE_SUBSCRIPT
+        | O::ENABLE_WIKILINKS
 }
 
 // Полный путь «файл → структура, готовая к рендеру», без рендера.
@@ -302,6 +336,181 @@ fn generate_full_markup_md(lines: usize) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  ПРОВЕРКА ДОКУМЕНТОВ
+// ═══════════════════════════════════════════════════════════════
+//
+// Проверка, что документы действительно разбираются в структуру, а не
+// просканированы как текст. Без неё конкурент может «выиграть», ни разу не
+// разобрав разметку: такое уже случалось — с `Options::all()` строка `---`
+// открывала блок YAML-метаданных и съедала весь документ целиком, а цифра
+// выглядела как честный результат. Теперь такой класс ошибок падает на старте
+// прогона, а не попадает в README.
+//
+// Проверяется на обоих markdown-документах и обоих конкурентах:
+// - pulldown: нет `Tag::MetadataBlock`, есть таблица, зачёркивание, math,
+//   разделитель, цитата, списки, заголовки; в `Text` не осталось сырых
+//   `~~`, `==`, `))` — то есть разметка не уехала в текст;
+// - ferromark: те же события на уровне блоков и инлайна.
+//
+// Гоняется дважды: как тест (`cargo test --benches`, маленький документ) и на
+// старте прогона бенчей (`len_parse_spans`, полный документ).
+fn check_documents(lines: usize) {
+    use pulldown_cmark::{Event, Tag};
+
+    for (name, doc, wants_rule) in [
+        ("parse_spans", generate_md_doc(lines), false),
+        ("full_markup", generate_full_markup_md(lines), true),
+    ] {
+        let events: Vec<Event> =
+            pulldown_cmark::Parser::new_ext(&doc, pulldown_options()).collect();
+
+        let count_tag = |f: fn(&Tag) -> bool| {
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::Start(t) if f(t)))
+                .count()
+        };
+        let mut missing: Vec<&str> = Vec::new();
+        if count_tag(|t| matches!(t, Tag::MetadataBlock(_))) != 0 {
+            panic!("{name}: документ съеден блоком метаданных (YAML `---`), а не разобран");
+        }
+        if count_tag(|t| matches!(t, Tag::Table(_))) == 0 {
+            missing.push("Tag::Table");
+        }
+        if count_tag(|t| matches!(t, Tag::BlockQuote(_))) == 0 {
+            missing.push("Tag::BlockQuote");
+        }
+        if count_tag(|t| matches!(t, Tag::List(_))) == 0 {
+            missing.push("Tag::List");
+        }
+        if count_tag(|t| matches!(t, Tag::Heading { .. })) == 0 {
+            missing.push("Tag::Heading");
+        }
+        // `---` есть только в полной палитре; в `parse_spans` его нет by design.
+        if wants_rule && !events.iter().any(|e| matches!(e, Event::Rule)) {
+            missing.push("Event::Rule");
+        }
+        if !events
+            .iter()
+            .any(|e| matches!(e, Event::Start(Tag::Strikethrough)))
+        {
+            missing.push("Tag::Strikethrough");
+        }
+        if !events
+            .iter()
+            .any(|e| matches!(e, Event::InlineMath(_) | Event::DisplayMath(_)))
+        {
+            missing.push("Event::InlineMath/DisplayMath");
+        }
+        let leftovers: Vec<&str> = ["~~", "==", "))"]
+            .into_iter()
+            .filter(|marker| {
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Text(t) if t.contains(marker)))
+            })
+            .collect();
+        if !leftovers.is_empty() {
+            panic!("{name}: разметка осталась в Event::Text: {leftovers:?}");
+        }
+        assert!(
+            missing.is_empty(),
+            "{name}: pulldown не разобрал {missing:?}"
+        );
+        eprintln!(
+            "check: {name} md разобран pulldown, {} событий",
+            events.len()
+        );
+    }
+
+    let opts = ferromark_options();
+    for (name, doc, wants_rule) in [
+        ("parse_spans", generate_md_doc(lines), false),
+        ("full_markup", generate_full_markup_md(lines), true),
+    ] {
+        let mut parser =
+            ferromark::block::BlockParser::new_with_options(doc.as_bytes(), opts.clone());
+        let mut blocks: Vec<ferromark::block::BlockEvent> = Vec::new();
+        parser.parse(&mut blocks);
+        let link_refs = parser.take_link_refs();
+        ferromark::fixup_list_tight(&mut blocks);
+
+        let mut inline_parser = ferromark::inline::InlineParser::new();
+        let mut events: Vec<ferromark::inline::InlineEvent> = Vec::new();
+        let refs = opts.allow_link_refs.then_some(&link_refs);
+        let mut inline_seen = [false; 4]; // strikethrough, highlight, math, footnote
+        for event in &blocks {
+            if let ferromark::block::BlockEvent::Text(range) = event {
+                events.clear();
+                inline_parser.parse_with_options(
+                    range.slice(doc.as_bytes()),
+                    refs,
+                    opts.allow_html,
+                    opts.strikethrough,
+                    opts.highlight,
+                    opts.superscript,
+                    opts.subscript,
+                    opts.autolink_literals,
+                    opts.math,
+                    false,
+                    None,
+                    &mut events,
+                );
+                for ev in &events {
+                    match ev {
+                        ferromark::inline::InlineEvent::StrikethroughStart
+                        | ferromark::inline::InlineEvent::HighlightStart
+                        | ferromark::inline::InlineEvent::MathInline(_)
+                        | ferromark::inline::InlineEvent::MathDisplay(_)
+                        | ferromark::inline::InlineEvent::InlineFootnote(_) => {
+                            inline_seen[match ev {
+                                ferromark::inline::InlineEvent::StrikethroughStart => 0,
+                                ferromark::inline::InlineEvent::HighlightStart => 1,
+                                _ => 2,
+                            }] = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let has_block = |f: fn(&ferromark::block::BlockEvent) -> bool| blocks.iter().any(f);
+        let mut missing: Vec<&str> = Vec::new();
+        if !has_block(|e| matches!(e, ferromark::block::BlockEvent::TableStart)) {
+            missing.push("BlockEvent::TableStart");
+        }
+        if wants_rule && !has_block(|e| matches!(e, ferromark::block::BlockEvent::ThematicBreak(_)))
+        {
+            missing.push("BlockEvent::ThematicBreak");
+        }
+        if !has_block(|e| matches!(e, ferromark::block::BlockEvent::BlockQuoteStart { .. })) {
+            missing.push("BlockEvent::BlockQuoteStart");
+        }
+        if !has_block(|e| matches!(e, ferromark::block::BlockEvent::ListStart { .. })) {
+            missing.push("BlockEvent::ListStart");
+        }
+        if !has_block(|e| matches!(e, ferromark::block::BlockEvent::HeadingStart { .. })) {
+            missing.push("BlockEvent::HeadingStart");
+        }
+        if !inline_seen[0] {
+            missing.push("InlineEvent::StrikethroughStart");
+        }
+        if !inline_seen[2] {
+            missing.push("InlineEvent::Math*");
+        }
+        assert!(
+            missing.is_empty(),
+            "{name}: ferromark не разобрал {missing:?}"
+        );
+        eprintln!(
+            "check: {name} md разобран ferromark, {} блок-событий",
+            blocks.len()
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  БЕНЧМАРКИ
 // ═══════════════════════════════════════════════════════════════
 
@@ -316,6 +525,19 @@ fn len_parse_spans(_c: &mut Criterion) {
     eprintln!("MD:          {} bytes", md_doc.len());
     eprintln!("Zoll full:   {} bytes", full_zoll.len());
     eprintln!("MD full:     {} bytes", full_md.len());
+
+    check_documents(DOC_LINES);
+}
+
+// Тест на то же, что и `check_documents` в прогоне бенчей, но на маленьком
+// документе, чтобы `cargo test` не жевал полмиллиона байт в debug-профиле.
+// Запуск: cargo test --benches
+#[cfg(test)]
+mod doc_checks {
+    #[test]
+    fn markdown_documents_are_parsed_into_structure() {
+        super::check_documents(200);
+    }
 }
 
 // ─── 1. Парсинг в плоский список ──────────────────────────────
