@@ -9,14 +9,34 @@
 //!
 //! Правило сравнения: каждый парсер обязан отдать **всё, что нужно рендереру**.
 //! Недопарсенный результат в сравнение не берётся — это занижает конкурента,
-//! а не показывает преимущество. Поэтому ferromark здесь гоняется полностью:
-//! блоки → `take_link_refs` → `fixup_list_tight` → инлайн по текстовым
-//! диапазонам, ровно как в его собственном рендерере, но без самого рендера.
+//! а не показывает преимущество. Поэтому:
+//! - ferromark гоняется полностью: блоки → `take_link_refs` → `fixup_list_tight`
+//!   → инлайн по текстовым диапазонам, ровно как в его собственном рендерере,
+//!   но без самого рендера;
+//! - у обоих конкурентов включены все расширения, которые они умеют
+//!   (`ferromark_options`, `pulldown_options`), причём так, чтобы они читали
+//!   разметку, а не текст: иначе сопоставимых конструкций просто не будет.
 //!
 //! Стрим-варианты (`*_stream`, `*_stream_ttfs`) живут в тех же группах,
 //! что и батч, на том же документе: `*_stream` — полное время парсинга
 //! с отдачей спанов по мере готовности, `*_stream_ttfs` — время до
 //! первого спана (time-to-first-span).
+//!
+//! Документы:
+//! - `parse_spans` — **эквивалентные** документы, максимально построчно
+//!   совпадающие. Всё, что markdown не выражает нативным синтаксисом или
+//!   универсальным raw HTML с тем же смыслом, из документов убрано (спойлеры:
+//!   нативной формы нет, а `<details>` — всегда многострочный HTML-блок с
+//!   закрывающей пустой строкой, из-за чего совпадение строк ломается; вернём
+//!   их отдельной группой). Разметка на каждой стороне должна срабатывать
+//!   **по-настоящему**, поэтому `==highlight==` (только ferromark) заменён на
+//!   `<mark>`, а таблице добавлен разделитель `| --- | --- |`.
+//! - `full_markup` — та же идея на полной палитре конструкций. zoll-документы
+//!   не меняются.
+//! - Единственная неизбежная асимметрия: markdown требует строку-разделитель
+//!   для таблицы, а zoll — нет, поэтому markdown-документы длиннее. Основная
+//!   метрика — абсолютное время; в README рядом с ним идёт нс на байт своего
+//!   входа.
 //!
 //! sparkdown (0.1.0) — HTML-only (scaffold, только абзацы), поэтому только
 //! в `html_render`. ferromark — публичный API полного разбора: `BlockParser`
@@ -34,26 +54,50 @@ use std::time::{Duration, Instant};
 
 use zoll::engine::{Engine, INTERESTING_BYTES, SpanSink, dispatch_spans, scan};
 
-// ─── 0. Полный разбор ferromark и его конфигурация ─────────────
+// ─── 0. Конфигурации конкурентов и полный разбор ferromark ─────
 //
-// `Options::commonmark()` выключает tables/strikethrough/highlight/math —
-// то есть ровно те конструкции, которые есть в тестовом документе. С такой
-// конфигурацией ferromark сканирует текст, не видя в нём разметки, и
-// выигрывает нечестно. Поэтому конфигурация собирается явно: GFM (таблицы,
-// зачёркивание, таски, автоссылки) + highlight + math.
+// У обоих конкурентов включается всё, что они умеют: сравнивать парсер,
+// которому часть грамматики выключили, бессмысленно — он читает документ как
+// текст и выигрывает нечестно. Дефолты не годятся: `ferromark::Options::commonmark()`
+// и `pulldown_cmark::Parser::new` = `Options::empty()` выключают tables,
+// strikethrough, highlight и math, а в тестовом документе есть все четыре.
 //
-// `disallowed_raw_html: false` — в тестовом документе `<u>`, `<ins>`, `<del>`,
-// `<sup>`, `<sub>` это осмысленная разметка, и pulldown-cmark их тоже не
-// фильтрует. GFM-фильтр запрещённого raw HTML выключен, чтобы обе стороны
-// читали один и тот же смысл.
+// `render_policy: Trusted` + `disallowed_raw_html: false` — `<u>`, `<ins>`,
+// `<del>`, `<sup>`, `<sub>`, `<mark>` в документе это осмысленная разметка,
+// и pulldown-cmark их тоже не фильтрует. Untrusted экранировал бы их, а
+// GFM-фильтр запрещённого raw HTML отсёк бы часть тегов: обе стороны должны
+// читать один и тот же смысл.
+//
+// `front_matter: false` оставлен намеренно: он не добавляет работы, зато на
+// будущем документе, начинающемся с `---`, молча вырезал бы содержимое.
 fn ferromark_options() -> ferromark::Options {
     ferromark::Options {
         render_policy: ferromark::RenderPolicy::Trusted,
         disallowed_raw_html: false,
+        front_matter: false,
         highlight: true,
         math: true,
+        superscript: true,
+        subscript: true,
+        callouts: true,
+        definition_lists: true,
+        footnotes: true,
+        inline_footnotes: true,
+        merged_table_cells: true,
+        table_column_widths: true,
+        heading_ids: true,
+        line_comments: true,
         ..ferromark::Options::gfm()
     }
+}
+
+// Все расширения pulldown-cmark: таблицы, сноски, зачёркивание, таски, смарт-
+// пунктуация, атрибуты заголовков, метаданные, math, GFM, списки определений,
+// верхний/нижний индекс, вики-ссылки. Флаги, для которых в документе нет
+// соответствующего синтаксиса, ничего не стоят — зато конкурент точно не
+// обвинён в том, что ему что-то недодали.
+fn pulldown_options() -> pulldown_cmark::Options {
+    pulldown_cmark::Options::all()
 }
 
 // Полный путь «файл → структура, готовая к рендеру», без рендера.
@@ -122,13 +166,16 @@ fn ferromark_full_parse(input: &[u8], opts: &ferromark::Options) {
 const DOC_LINES: usize = 5_000;
 
 // Генерирует zoll-документ (5000 строк, ~390 KB).
-// Содержит всю палитру синтаксиса: заголовки, bold, italic, списки,
-// цитаты, комментарии, спойлеры, таблицы, формулы.
+// Палитра подобрана так, чтобы каждая конструкция имела эквивалент в
+// markdown (нативный или raw HTML с тем же смыслом) — иначе сравнение
+// документов перестаёт быть эквивалентным. Спойлеров здесь нет: в markdown
+// нативной формы нет, а `<details>` всегда многострочный HTML-блок с
+// закрывающей пустой строкой. Вернём их отдельной группой.
 fn generate_zoll_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("#1 Benchmark Document\n\n");
     for i in 0..lines.saturating_sub(3) {
-        let section = i % 12;
+        let section = i % 11;
         match section {
             0 => s.push_str("#2 Section\n"),
             1 => s.push_str("This is **bold)) and //italic)) text\n"),
@@ -138,10 +185,9 @@ fn generate_zoll_doc(lines: usize) -> String {
             5 => s.push_str("Plain text ~~strike)) __underline))\n"),
             6 => s.push_str("++insert)) --delete)) ''super)) ,,sub))\n"),
             7 => s.push_str("%%this is a comment line}\n"),
-            8 => s.push_str("!!spoiler hidden}\n"),
-            9 => s.push_str("| cell | cell |\n"),
-            10 => s.push_str("$$sqrt(x)}\n"),
-            11 => s.push_str("plain text line\n"),
+            8 => s.push_str("| cell | cell |\n"),
+            9 => s.push_str("$$sqrt(x)}\n"),
+            10 => s.push_str("plain text line\n"),
             _ => unreachable!(),
         }
     }
@@ -149,25 +195,33 @@ fn generate_zoll_doc(lines: usize) -> String {
     s
 }
 
-// Генерирует семантически эквивалентный markdown-документ.
+// Markdown-документ, эквивалентный `generate_zoll_doc` построчно.
+//
+// Два отличия, и оба вынужденные:
+// - `==highlight==` заменён на `<mark>highlight</mark>`: highlight есть
+//   только у ferromark, pulldown-cmark не поддерживает его ни одним флагом;
+// - таблице добавлена строка-разделитель: GFM требует её, а zoll обходится
+//   строкой `| ... |`. Из-за этого markdown-документ длиннее, что учтено
+//   метрикой «нс на байт своего входа».
 fn generate_md_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("# Benchmark Document\n\n");
     for i in 0..lines.saturating_sub(3) {
-        let section = i % 12;
+        let section = i % 11;
         match section {
             0 => s.push_str("## Section\n"),
             1 => s.push_str("This is **bold** and *italic* text\n"),
             2 => s.push_str("- list item with **bold**\n"),
             3 => s.push_str("1. numbered item with *italic*\n"),
-            4 => s.push_str("> quote line with ==highlight==\n"),
+            4 => s.push_str("> quote line with <mark>highlight</mark>\n"),
             5 => s.push_str("Plain text ~~strike~~ <u>underline</u>\n"),
-            6 => s.push_str("<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub>\n"),
+            6 => {
+                s.push_str("<ins>insert</ins> <del>delete</del> <sup>super</sup> <sub>sub</sub>\n")
+            }
             7 => s.push_str("<!-- this is a comment line -->\n"),
-            8 => s.push_str("||spoiler hidden content||\n"),
-            9 => s.push_str("| cell | cell |\n"),
-            10 => s.push_str("$$ sqrt(x) $$\n"),
-            11 => s.push_str("plain text line\n"),
+            8 => s.push_str("| cell | cell |\n| --- | --- |\n"),
+            9 => s.push_str("$$ sqrt(x) $$\n"),
+            10 => s.push_str("plain text line\n"),
             _ => unreachable!(),
         }
     }
@@ -177,15 +231,15 @@ fn generate_md_doc(lines: usize) -> String {
 
 // Генерирует zoll-документ с ПОЛНОЙ палитрой конструкций: все inline
 // (bold/italic/underline/strike/highlight/insert/delete/super/sub/formula),
-// все line-level (%%/$$/!! + спойлер с заголовком), все block-level
-// (%%%/$$$/!!!), структура (#N, #:тег, ---, списки, цитата, таблица).
-// Цикл из 16 секций: 13 однострочных + 3 блочных (по 3 строки) = 22 строки.
+// line-level (%%/$$), block-level (%%%/$$$), структура (#N, #:тег, ---,
+// списки, цитата, таблица). Спойлеры исключены — см. `generate_zoll_doc`.
+// Цикл из 13 секций: 11 однострочных + 2 блочных (по 3 строки) = 17 строк.
 fn generate_full_markup_doc(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("#1 Full Markup Benchmark\n\n");
-    let cycles = lines * 16 / 22;
+    let cycles = lines * 13 / 17;
     for i in 0..cycles {
-        let section = i % 16;
+        let section = i % 13;
         match section {
             0 => s.push_str("#2 Section\n"),
             1 => s.push_str("**bold)) //italic)) __underline)) ~~strike))\n"),
@@ -198,11 +252,8 @@ fn generate_full_markup_doc(lines: usize) -> String {
             8 => s.push_str("| cell | cell |\n"),
             9 => s.push_str("%%comment}\n"),
             10 => s.push_str("$$sqrt(x)}\n"),
-            11 => s.push_str("!!spoiler}\n"),
-            12 => s.push_str("!!заголовок: скрытое}\n"),
-            13 => s.push_str("%%%\nblock comment\n}\n"),
-            14 => s.push_str("$$$\nblock formula\n}\n"),
-            15 => s.push_str("!!!спойлер:\nblock spoiler\n}\n"),
+            11 => s.push_str("%%%\nblock comment\n}\n"),
+            12 => s.push_str("$$$\nblock formula\n}\n"),
             _ => unreachable!(),
         }
     }
@@ -210,13 +261,22 @@ fn generate_full_markup_doc(lines: usize) -> String {
     s
 }
 
-// Markdown-эквивалент полной палитры (для сравнения с другими парсерами).
+// Markdown-эквивалент полной палитры. Три отличия от `generate_full_markup_doc`,
+// все вынужденные и все такие, что разметка срабатывает по-настоящему:
+// - `==highlight==` → `<mark>highlight</mark>`: highlight есть только у
+//   ferromark, pulldown-cmark не поддерживает его ни одним флагом;
+// - таблице добавлен разделитель `| --- | --- |`: GFM требует его, zoll — нет;
+// - `#:tag` переводится в `<!-- tag -->`: тегов в markdown нет, это ближайшее
+//   нативное construct'ное место (комментарий, а не тег).
+// Спойлеров нет по причине, описанной в `generate_zoll_doc`.
+// Цикл из 13 секций: 11 однострочных + 2 блочных = 17 строк (плюс строка
+// разделителя таблицы, поэтому markdown-документ длиннее zoll-документа).
 fn generate_full_markup_md(lines: usize) -> String {
     let mut s = String::with_capacity(lines * 80);
     s.push_str("# Full Markup Benchmark\n\n");
-    let cycles = lines * 16 / 22;
+    let cycles = lines * 13 / 17;
     for i in 0..cycles {
-        let section = i % 16;
+        let section = i % 13;
         match section {
             0 => s.push_str("## Section\n"),
             1 => s.push_str("**bold** *italic* <u>underline</u> ~~strike~~\n"),
@@ -226,17 +286,14 @@ fn generate_full_markup_md(lines: usize) -> String {
             ),
             3 => s.push_str("- list item with **bold**\n"),
             4 => s.push_str("1. numbered item with *italic*\n"),
-            5 => s.push_str("> quote line with ==highlight==\n"),
+            5 => s.push_str("> quote line with <mark>highlight</mark>\n"),
             6 => s.push_str("<!-- tag -->\n"),
             7 => s.push_str("---\n"),
-            8 => s.push_str("| cell | cell |\n"),
+            8 => s.push_str("| cell | cell |\n| --- | --- |\n"),
             9 => s.push_str("<!-- comment -->\n"),
             10 => s.push_str("$$ x = y $$\n"),
-            11 => s.push_str("||spoiler hidden||\n"),
-            12 => s.push_str("||spoiler title: hidden||\n"),
-            13 => s.push_str("<!--\nblock comment\n-->\n"),
-            14 => s.push_str("$$\nblock formula\n$$\n"),
-            15 => s.push_str("||\nblock spoiler\n||\n"),
+            11 => s.push_str("<!--\nblock comment\n-->\n"),
+            12 => s.push_str("$$\nblock formula\n$$\n"),
             _ => unreachable!(),
         }
     }
@@ -317,10 +374,13 @@ fn bench_parse_spans(c: &mut Criterion) {
     });
 
     group.throughput(Throughput::Bytes(md_doc.len() as u64));
+    // Все расширения включены: иначе зачёркивание, таблицы и формулы идут
+    // для pulldown обычным текстом (см. `pulldown_options`).
+    let pulldown_opts = pulldown_options();
     group.bench_function("pulldown_cmark_events", |b| {
         b.iter(|| {
             let events: Vec<pulldown_cmark::Event> =
-                pulldown_cmark::Parser::new(black_box(&md_doc)).collect();
+                pulldown_cmark::Parser::new_ext(black_box(&md_doc), pulldown_opts).collect();
             black_box(events);
         });
     });
@@ -348,9 +408,10 @@ fn bench_html_render(c: &mut Criterion) {
     let mut group = c.benchmark_group("html_render");
     group.throughput(Throughput::Bytes(md_doc.len() as u64));
 
+    let pulldown_opts = pulldown_options();
     group.bench_function("pulldown_cmark_html", |b| {
         b.iter(|| {
-            let parser = pulldown_cmark::Parser::new(black_box(&md_doc));
+            let parser = pulldown_cmark::Parser::new_ext(black_box(&md_doc), pulldown_opts);
             let mut html = String::new();
             pulldown_cmark::html::push_html(&mut html, parser);
             black_box(html);
@@ -366,9 +427,9 @@ fn bench_html_render(c: &mut Criterion) {
         });
     });
 
-    // ferromark: та же конфигурация, что и в parse_spans (GFM + highlight +
-    // math, Trusted без GFM-фильтра raw HTML), чтобы обе группы мерили
-    // одну и ту же грамматику.
+    // ferromark: та же конфигурация, что и в parse_spans (все расширения,
+    // Trusted без GFM-фильтра raw HTML), чтобы обе группы мерили одну и ту
+    // же грамматику.
     let ferromark_opts = ferromark_options();
     group.bench_function("ferromark_html", |b| {
         b.iter(|| {
@@ -466,10 +527,11 @@ fn bench_full_markup(c: &mut Criterion) {
     });
 
     group.throughput(Throughput::Bytes(md_doc.len() as u64));
+    let pulldown_opts = pulldown_options();
     group.bench_function("pulldown_cmark_events", |b| {
         b.iter(|| {
             let events: Vec<pulldown_cmark::Event> =
-                pulldown_cmark::Parser::new(black_box(&md_doc)).collect();
+                pulldown_cmark::Parser::new_ext(black_box(&md_doc), pulldown_opts).collect();
             black_box(events);
         });
     });
